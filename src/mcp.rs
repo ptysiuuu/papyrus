@@ -77,6 +77,11 @@ pub struct SearchOutput {
     pub cached: bool,
 }
 
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GetPaperOutput {
+    pub paper: Option<Paper>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetPaperInput {
     #[schemars(description = "DOI of the paper")]
@@ -126,7 +131,25 @@ impl PapyrusMcp {
         let mut sources_degraded: Vec<String> = Vec::new();
         let mut any_cached = false;
 
-        for source in &self.sources {
+        // Map PaperSourceKind variants to the scraper name() strings
+        fn source_name(kind: &PaperSourceKind) -> &'static str {
+            match kind {
+                PaperSourceKind::Arxiv => "arXiv",
+                PaperSourceKind::SemanticScholar => "Semantic Scholar",
+                PaperSourceKind::PubMed => "PubMed",
+                PaperSourceKind::CrossRef => "CrossRef",
+            }
+        }
+        let requested: std::collections::HashSet<&str> = fs.sources
+            .iter()
+            .map(source_name)
+            .collect();
+        let active: Vec<_> = self.sources
+            .iter()
+            .filter(|s| requested.is_empty() || requested.contains(s.name()))
+            .collect();
+
+        for source in active {
             let name = source.name();
             let cache_key = DiskCache::cache_key(&fs, name);
 
@@ -250,7 +273,7 @@ impl PapyrusMcp {
     async fn get_paper(
         &self,
         Parameters(input): Parameters<GetPaperInput>,
-    ) -> Result<Json<Option<Paper>>, rmcp::ErrorData> {
+    ) -> Result<Json<GetPaperOutput>, rmcp::ErrorData> {
         if input.doi.is_none() && input.arxiv_id.is_none() && input.pubmed_id.is_none() {
             return Err(rmcp::ErrorData::invalid_params(
                 "at least one of doi, arxiv_id, or pubmed_id is required",
@@ -259,16 +282,28 @@ impl PapyrusMcp {
         }
 
         let mut fs = FilterSet::default();
-        fs.doi = input.doi;
-        fs.arxiv_id = input.arxiv_id;
         fs.limit = 1;
+
+        // Scope sources to only those that understand the given identifier.
+        // arXiv uses id_list (not DOI); PubMed uses PMID; CrossRef/S2 resolve DOIs.
+        if let Some(ref arxiv_id) = input.arxiv_id {
+            fs.arxiv_id = Some(arxiv_id.clone());
+            fs.sources = vec![PaperSourceKind::Arxiv];
+        } else if let Some(ref pubmed_id) = input.pubmed_id {
+            // PubMed ID: pass as a query to PubMed only
+            fs.query = Some(pubmed_id.clone());
+            fs.sources = vec![PaperSourceKind::PubMed];
+        } else if let Some(ref doi) = input.doi {
+            fs.doi = Some(doi.clone());
+            fs.sources = vec![PaperSourceKind::SemanticScholar, PaperSourceKind::CrossRef];
+        }
 
         let out = self
             .do_search(fs)
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-        Ok(Json(out.papers.into_iter().next()))
+        Ok(Json(GetPaperOutput { paper: out.papers.into_iter().next() }))
     }
 
     #[tool(description = "Export papers to JSON, CSV, or BibTeX. Use paper IDs from a previous search_papers call. Returns the file path written.")]
