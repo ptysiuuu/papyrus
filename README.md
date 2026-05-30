@@ -1,8 +1,8 @@
 # papyrus
 
-**Search academic papers from your terminal — fast, filterable, exportable.**
+**Search academic papers from your terminal  -  fast, filterable, exportable.**
 
-A Ratatui TUI for querying arXiv, Semantic Scholar, PubMed, and CrossRef simultaneously. Navigate results with vim keys, view abstracts inline, copy DOIs, open PDFs, and export to JSON, CSV, or BibTeX — all without leaving the terminal. Responses are cached to disk and per-source rate limits are enforced automatically.
+A Ratatui TUI for querying arXiv, Semantic Scholar, PubMed, and CrossRef simultaneously. Navigate results with vim keys, view abstracts inline, copy DOIs, open PDFs, and export to JSON, CSV, or BibTeX  -  all without leaving the terminal. Responses are cached to disk and per-source rate limits are enforced automatically.
 
 <!-- demo gif here -->
 ```
@@ -13,17 +13,17 @@ A Ratatui TUI for querying arXiv, Semantic Scholar, PubMed, and CrossRef simulta
 ├────────────────────────────┬─────────────────────────────────────────┤
 │  Results (47 found)        │  Detail View                            │
 │  ──────────────────        │  ─────────────────────────────────      │
-│▶  1. Scaling Laws for…     │  Title: Scaling Laws for Neural…        │
-│   2. Neural Scaling and…   │  Authors: Hoffmann, J. et al.           │
-│   3. Emergent Abilities…   │  Date:   2022-03-29                     │
-│   4. Training Compute-…    │  Source: arXiv [2203.15556]             │
-│   5. Beyond Neural Scal…   │  Citations: 1,842                       │
-│   6. Revisiting Scaling…   │  Categories: cs.LG, cs.CL              │
-│                            │  Journal: —                             │
+│  1. Scaling Laws for...     │  Title: Scaling Laws for Neural...        │
+│   2. Neural Scaling and...   │  Authors: Hoffmann, J. et al.           │
+│   3. Emergent Abilities...   │  Date:   2022-03-29                     │
+│   4. Training Compute-...    │  Source: arXiv [2203.15556]             │
+│   5. Beyond Neural Scal...   │  Citations: 1,842                       │
+│   6. Revisiting Scaling...   │  Categories: cs.LG, cs.CL              │
+│                            │  Journal:  -                              │
 │                            │  DOI: 10.48550/arXiv.2203.15556         │
 │                            │                                         │
 │                            │  Abstract:                              │
-│                            │  We investigate the optimal…            │
+│                            │  We investigate the optimal...            │
 │                            │                                         │
 │                            │  [p] PDF  [Enter] HTML  [b] BibTeX      │
 ├────────────────────────────┴─────────────────────────────────────────┤
@@ -49,7 +49,7 @@ cargo build --release
 ## Usage
 
 ```bash
-# Interactive TUI — opens with no arguments
+# Interactive TUI  -  opens with no arguments
 papyrus
 
 # TUI with pre-filled search
@@ -114,7 +114,7 @@ papyrus -q "transformers" --no-cache
 | `--sort` | | String | `relevance` (default), `date-desc`, `date-asc`, `citations-desc` |
 | `--output` | `-o` | Path | Export results. Extension sets format: `.json`, `.csv`, `.bib` |
 | `--format` | `-f` | String | Override export format: `json`, `csv`, `bibtex` |
-| `--no-tui` | | flag | Headless/batch mode — print JSON to stdout |
+| `--no-tui` | | flag | Headless/batch mode  -  print JSON to stdout |
 | `--quiet` | | flag | Suppress progress output in `--no-tui` mode |
 | `--no-cache` | | flag | Bypass disk cache and force a fresh fetch |
 
@@ -131,7 +131,7 @@ papyrus -q "transformers" --no-cache
 
 ## Subcommands
 
-### `papyrus keys` — API key management
+### `papyrus keys`  -  API key management
 
 ```bash
 papyrus keys set semantic <key>    # store a Semantic Scholar key
@@ -142,7 +142,7 @@ papyrus keys remove semantic       # delete a stored key
 
 Keys are written to `~/.config/papyrus/config.toml` under `[api_keys]`. Valid source names: `semantic`, `pubmed`.
 
-### `papyrus cache` — disk cache management
+### `papyrus cache`  -  disk cache management
 
 ```bash
 papyrus cache stats    # show entry count and disk usage
@@ -195,9 +195,9 @@ default_sort = "relevance"
 cache_ttl_minutes = 60          # 0 to disable caching
 
 [api_keys]
-# Semantic Scholar — https://www.semanticscholar.org/product/api
+# Semantic Scholar  -  https://www.semanticscholar.org/product/api
 # semantic_scholar = ""
-# PubMed — https://www.ncbi.nlm.nih.gov/account/
+# PubMed  -  https://www.ncbi.nlm.nih.gov/account/
 # pubmed = ""
 
 [output]
@@ -206,7 +206,7 @@ default_format = "json"
 
 [network]
 user_agent = "papyrus/0.1.0 (mailto:you@example.com)"
-polite_email = ""               # CrossRef polite pool — improves rate limits
+polite_email = ""               # CrossRef polite pool  -  improves rate limits
 
 [ui]
 show_abstracts_in_list = false
@@ -238,14 +238,14 @@ PAPYRUS_SEMANTIC_KEY=sk-xxx papyrus --no-tui -q "transformers" -s semantic -n 10
 
 ## Rate Limits
 
-Rate limits are enforced automatically using a token-bucket algorithm (no sleep-based throttling). On HTTP 429, the affected source backs off using the `Retry-After` header value and retries once — other sources continue unaffected.
+Rate limits are enforced automatically using a token-bucket algorithm (no sleep-based throttling). On HTTP 429, the affected source backs off using the `Retry-After` header value and retries once  -  other sources continue unaffected.
 
 | Source | Without key | With key |
 |--------|------------|----------|
-| arXiv | 1 req / 3 sec | — |
+| arXiv | 1 req / 3 sec |  -  |
 | Semantic Scholar | 100 req / 5 min | 1 req / sec |
 | PubMed | 3 req / sec | 10 req / sec |
-| CrossRef | 4 req / sec (polite pool) | — |
+| CrossRef | 4 req / sec (polite pool) |  -  |
 
 ## Response Cache
 
@@ -262,8 +262,8 @@ papyrus -q "..." --no-cache   # bypass cache for this run
 | Source | API | Key |
 |--------|-----|-----|
 | [arXiv](https://arxiv.org/help/api/) | Atom/XML | Not required |
-| [Semantic Scholar](https://api.semanticscholar.org/) | JSON REST | Optional — [get one](https://www.semanticscholar.org/product/api) |
-| [PubMed](https://www.ncbi.nlm.nih.gov/home/develop/api/) | XML E-utilities | Optional — [get one](https://www.ncbi.nlm.nih.gov/account/) |
+| [Semantic Scholar](https://api.semanticscholar.org/) | JSON REST | Optional  -  [get one](https://www.semanticscholar.org/product/api) |
+| [PubMed](https://www.ncbi.nlm.nih.gov/home/develop/api/) | XML E-utilities | Optional  -  [get one](https://www.ncbi.nlm.nih.gov/account/) |
 | [CrossRef](https://www.crossref.org/documentation/retrieve-metadata/rest-api/) | JSON REST | Not required (set `polite_email` for priority) |
 
 ## Examples
@@ -281,7 +281,7 @@ papyrus -a "Yann LeCun" --peer-reviewed --last-months 6
 # Fetch by arXiv ID
 papyrus --arxiv-id 2301.07041
 
-# Multi-source, cs.AI + cs.LG, 2022–2024
+# Multi-source, cs.AI + cs.LG, 2022 - 2024
 papyrus -q "transformer" -c cs.AI -c cs.LG --from 2022 --to 2024 -s arxiv -s semantic
 
 # Pipeline: extract all PDF links, bypassing cache
