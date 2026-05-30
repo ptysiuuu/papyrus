@@ -113,13 +113,20 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         .filters
         .sources
         .iter()
-        .map(|s| {
-            Span::styled(
-                format!(" {} ", s),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            )
+        .flat_map(|s| {
+            let name = s.to_string();
+            let label = Span::styled(
+                format!(" {} ", name),
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            );
+            if app.cached_sources.contains(&name) {
+                vec![
+                    label,
+                    Span::styled("[cached]", Style::default().fg(theme.muted)),
+                ]
+            } else {
+                vec![label]
+            }
         })
         .collect();
 

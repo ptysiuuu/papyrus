@@ -1,22 +1,32 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::NaiveDate;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use reqwest::Client;
 
+use crate::error::PapyrusError;
 use crate::filters::FilterSet;
 use crate::models::{Author, Paper, PaperSourceKind, SearchResult};
+use crate::ratelimit::{self, Limiter};
 
 use super::PaperSource;
 
 pub struct PubMedSource {
     client: Client,
     api_key: Option<String>,
+    limiter: Arc<Limiter>,
 }
 
 impl PubMedSource {
     pub fn new(client: Client, api_key: Option<String>) -> Self {
-        Self { client, api_key }
+        let limiter = if api_key.as_deref().map_or(false, |k| !k.is_empty()) {
+            ratelimit::pubmed_keyed()
+        } else {
+            ratelimit::pubmed_unkeyed()
+        };
+        Self { client, api_key, limiter }
     }
 
     fn api_key_param(&self) -> String {
@@ -34,7 +44,21 @@ impl PubMedSource {
             retstart,
             self.api_key_param()
         );
+        ratelimit::throttle(&self.limiter).await;
         let resp = self.client.get(&url).send().await?;
+        if resp.status().as_u16() == 429 {
+            let retry = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5);
+            return Err(PapyrusError::RateLimited {
+                src: "PubMed".to_string(),
+                retry_after_secs: retry,
+            }
+            .into());
+        }
         let json: serde_json::Value = resp.json().await?;
         let ids = json["esearchresult"]["idlist"]
             .as_array()

@@ -2,7 +2,7 @@
 
 **Search academic papers from your terminal — fast, filterable, exportable.**
 
-A Ratatui TUI for querying arXiv, Semantic Scholar, PubMed, and CrossRef simultaneously. Navigate results with vim keys, view abstracts inline, copy DOIs, open PDFs, and export to JSON, CSV, or BibTeX — all without leaving the terminal.
+A Ratatui TUI for querying arXiv, Semantic Scholar, PubMed, and CrossRef simultaneously. Navigate results with vim keys, view abstracts inline, copy DOIs, open PDFs, and export to JSON, CSV, or BibTeX — all without leaving the terminal. Responses are cached to disk and per-source rate limits are enforced automatically.
 
 <!-- demo gif here -->
 ```
@@ -57,6 +57,9 @@ papyrus -q "large language models" --from 2024 --has-pdf
 
 # Batch / headless mode
 papyrus --no-tui -q "diffusion models" -n 50 | jq '.[].pdf_url'
+
+# Skip disk cache for a fresh fetch
+papyrus -q "transformers" --no-cache
 ```
 
 ## CLI Flags
@@ -113,17 +116,38 @@ papyrus --no-tui -q "diffusion models" -n 50 | jq '.[].pdf_url'
 | `--format` | `-f` | String | Override export format: `json`, `csv`, `bibtex` |
 | `--no-tui` | | flag | Headless/batch mode — print JSON to stdout |
 | `--quiet` | | flag | Suppress progress output in `--no-tui` mode |
+| `--no-cache` | | flag | Bypass disk cache and force a fresh fetch |
 
 ### Config / Misc
 
 | Flag | Type | Description |
 |------|------|-------------|
 | `--config` | Path | Config file path. Default: `~/.config/papyrus/config.toml` |
-| `--api-key` | String | API key override (Semantic Scholar, PubMed) |
+| `--api-key` | String | API key override (applies to all keyed sources) |
 | `--timeout` | u32 | HTTP timeout in seconds. Default: `15` |
 | `--retries` | u32 | Retries on failure. Default: `3` |
 | `--concurrent` | u32 | Max concurrent requests. Default: `4` |
 | `--verbose` | `-v` | flag | Log HTTP requests to stderr |
+
+## Subcommands
+
+### `papyrus keys` — API key management
+
+```bash
+papyrus keys set semantic <key>    # store a Semantic Scholar key
+papyrus keys set pubmed <key>      # store a PubMed key
+papyrus keys list                  # show configured keys (values masked)
+papyrus keys remove semantic       # delete a stored key
+```
+
+Keys are written to `~/.config/papyrus/config.toml` under `[api_keys]`. Valid source names: `semantic`, `pubmed`.
+
+### `papyrus cache` — disk cache management
+
+```bash
+papyrus cache stats    # show entry count and disk usage
+papyrus cache clear    # delete all cached responses
+```
 
 ## TUI Keybindings
 
@@ -158,6 +182,8 @@ papyrus --no-tui -q "diffusion models" -n 50 | jq '.[].pdf_url'
 
 Config file: `~/.config/papyrus/config.toml`
 
+Created automatically on first run with commented-out fields and instructions.
+
 ```toml
 [general]
 default_sources = ["arxiv", "semantic"]
@@ -166,10 +192,13 @@ timeout_seconds = 15
 retries = 3
 concurrent_requests = 4
 default_sort = "relevance"
+cache_ttl_minutes = 60          # 0 to disable caching
 
 [api_keys]
-semantic_scholar = ""   # Optional — increases rate limit from 100/5min to 1/sec
-pubmed = ""             # Optional — increases rate limit from 3/sec to 10/sec
+# Semantic Scholar — https://www.semanticscholar.org/product/api
+# semantic_scholar = ""
+# PubMed — https://www.ncbi.nlm.nih.gov/account/
+# pubmed = ""
 
 [output]
 default_export_path = "~/papers"
@@ -177,24 +206,65 @@ default_format = "json"
 
 [network]
 user_agent = "papyrus/0.1.0 (mailto:you@example.com)"
-polite_email = ""       # Used in CrossRef polite pool for priority access
+polite_email = ""               # CrossRef polite pool — improves rate limits
 
 [ui]
 show_abstracts_in_list = false
-color_theme = "dark"    # "dark" | "light"
+color_theme = "dark"            # "dark" | "light"
 date_format = "%Y-%m-%d"
 ```
 
-Logs are written to `~/.local/share/papyrus/`.
+### Paths
+
+| Purpose | Path |
+|---------|------|
+| Config | `~/.config/papyrus/config.toml` |
+| Response cache | `~/.local/share/papyrus/cache/` |
+| Error log | `~/.local/share/papyrus/` |
+
+## API Keys
+
+Keys unlock higher rate limits. papyrus resolves them in this order:
+
+1. `--api-key` CLI flag *(overrides all sources)*
+2. Environment variables: `PAPYRUS_SEMANTIC_KEY`, `PAPYRUS_PUBMED_KEY`
+3. `~/.config/papyrus/config.toml` under `[api_keys]`
+
+The env var path is useful for CI or scripts where you don't want to touch the config file:
+
+```bash
+PAPYRUS_SEMANTIC_KEY=sk-xxx papyrus --no-tui -q "transformers" -s semantic -n 100
+```
+
+## Rate Limits
+
+Rate limits are enforced automatically using a token-bucket algorithm (no sleep-based throttling). On HTTP 429, the affected source backs off using the `Retry-After` header value and retries once — other sources continue unaffected.
+
+| Source | Without key | With key |
+|--------|------------|----------|
+| arXiv | 1 req / 3 sec | — |
+| Semantic Scholar | 100 req / 5 min | 1 req / sec |
+| PubMed | 3 req / sec | 10 req / sec |
+| CrossRef | 4 req / sec (polite pool) | — |
+
+## Response Cache
+
+Responses are cached at `~/.local/share/papyrus/cache/` as gzip-compressed JSON, keyed by a SHA-256 hash of the query and source. Default TTL is 1 hour (configurable via `cache_ttl_minutes`). Cached sources are indicated by a `[cached]` badge in the TUI header bar.
+
+```bash
+papyrus cache stats    # 12 entries, 48.3 KB on disk
+papyrus cache clear    # wipe everything
+papyrus -q "..." --no-cache   # bypass cache for this run
+```
 
 ## Data Sources
 
-| Source | API | Key Required |
-|--------|-----|-------------|
-| [arXiv](https://arxiv.org/help/api/) | Atom/XML | No |
-| [Semantic Scholar](https://api.semanticscholar.org/) | JSON REST | Optional (higher rate limit) |
-| [PubMed](https://www.ncbi.nlm.nih.gov/home/develop/api/) | XML E-utilities | Optional (higher rate limit) |
-| [CrossRef](https://www.crossref.org/documentation/retrieve-metadata/rest-api/) | JSON REST | No (polite pool via email) |
+| Source | API | Key |
+|--------|-----|-----|
+| [arXiv](https://arxiv.org/help/api/) | Atom/XML | Not required |
+| [Semantic Scholar](https://api.semanticscholar.org/) | JSON REST | Optional — [get one](https://www.semanticscholar.org/product/api) |
+| [PubMed](https://www.ncbi.nlm.nih.gov/home/develop/api/) | XML E-utilities | Optional — [get one](https://www.ncbi.nlm.nih.gov/account/) |
+| [CrossRef](https://www.crossref.org/documentation/retrieve-metadata/rest-api/) | JSON REST | Not required (set `polite_email` for priority) |
 
 ## Examples
 
@@ -214,8 +284,12 @@ papyrus --arxiv-id 2301.07041
 # Multi-source, cs.AI + cs.LG, 2022–2024
 papyrus -q "transformer" -c cs.AI -c cs.LG --from 2022 --to 2024 -s arxiv -s semantic
 
-# Pipeline: extract all PDF links
-papyrus --no-tui -q "diffusion models" --from 2023 --has-pdf -n 50 | jq '.[].pdf_url'
+# Pipeline: extract all PDF links, bypassing cache
+papyrus --no-tui -q "diffusion models" --from 2023 --has-pdf -n 50 --no-cache | jq '.[].pdf_url'
+
+# Set up API keys, then run with higher rate limits
+papyrus keys set semantic sk-...
+PAPYRUS_PUBMED_KEY=xxx papyrus -q "CRISPR" -s pubmed -n 100
 ```
 
 ## License

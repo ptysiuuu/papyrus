@@ -1,21 +1,31 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::NaiveDate;
 use reqwest::Client;
 use serde::Deserialize;
 
+use crate::error::PapyrusError;
 use crate::filters::{FilterSet, SortOrder};
 use crate::models::{Author, Paper, PaperSourceKind, SearchResult};
+use crate::ratelimit::{self, Limiter};
 
 use super::PaperSource;
 
 pub struct SemanticScholarSource {
     client: Client,
     api_key: Option<String>,
+    limiter: Arc<Limiter>,
 }
 
 impl SemanticScholarSource {
     pub fn new(client: Client, api_key: Option<String>) -> Self {
-        Self { client, api_key }
+        let limiter = if api_key.as_deref().map_or(false, |k| !k.is_empty()) {
+            ratelimit::semantic_keyed()
+        } else {
+            ratelimit::semantic_unkeyed()
+        };
+        Self { client, api_key, limiter }
     }
 }
 
@@ -172,9 +182,20 @@ impl PaperSource for SemanticScholarSource {
             req = req.header("x-api-key", key);
         }
 
+        ratelimit::throttle(&self.limiter).await;
         let resp = req.send().await?;
         if resp.status().as_u16() == 429 {
-            return Err(anyhow::anyhow!("Semantic Scholar rate limited"));
+            let retry = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5);
+            return Err(PapyrusError::RateLimited {
+                src: "Semantic Scholar".to_string(),
+                retry_after_secs: retry,
+            }
+            .into());
         }
         let body: S2Response = resp.json().await?;
 

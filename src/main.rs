@@ -1,10 +1,12 @@
 #![allow(dead_code)]
 mod app;
+mod cache;
 mod config;
 mod error;
 mod export;
 mod filters;
 mod models;
+mod ratelimit;
 mod scraper;
 mod ui;
 
@@ -14,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
@@ -24,7 +26,9 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::mpsc;
 
 use app::{App, AppEvent, FilterFieldType, Focus, Modal};
+use cache::DiskCache;
 use config::Config;
+use error::PapyrusError;
 use export::{export_papers, ExportFormat};
 use filters::FilterArgs;
 use models::{Paper, PaperSourceKind};
@@ -33,6 +37,9 @@ use scraper::{ArxivSource, CrossRefSource, PaperSource, PubMedSource, SemanticSc
 #[derive(Parser, Debug)]
 #[command(name = "papyrus", about = "Terminal research paper scraper", version)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     #[command(flatten)]
     filters: FilterArgs,
 
@@ -47,6 +54,9 @@ struct Cli {
 
     #[arg(long)]
     quiet: bool,
+
+    #[arg(long = "no-cache")]
+    no_cache: bool,
 
     #[arg(long)]
     config: Option<PathBuf>,
@@ -67,24 +77,115 @@ struct Cli {
     verbose: bool,
 }
 
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Manage API keys stored in config.toml
+    Keys(KeysArgs),
+    /// Cache management
+    Cache(CacheArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct KeysArgs {
+    #[command(subcommand)]
+    action: KeysAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum KeysAction {
+    /// Set an API key: papyrus keys set <source> <key>
+    Set { source: String, key: String },
+    /// List configured keys (values are masked)
+    List,
+    /// Remove an API key: papyrus keys remove <source>
+    Remove { source: String },
+}
+
+#[derive(clap::Args, Debug)]
+struct CacheArgs {
+    #[command(subcommand)]
+    action: CacheAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum CacheAction {
+    /// Delete all cached responses
+    Clear,
+    /// Show cache size and entry count
+    Stats,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let config = Config::load(cli.config.as_ref()).unwrap_or_else(|e| {
+    let config_path = cli.config.clone().unwrap_or_else(Config::default_path);
+    let config = Config::load(Some(&config_path)).unwrap_or_else(|e| {
         eprintln!("Config error: {}. Using defaults.", e);
         Config::default()
     });
 
+    // Handle subcommands before anything else
+    if let Some(cmd) = cli.command {
+        return dispatch_subcommand(cmd, &config_path, &config);
+    }
+
     let filter_set = cli.filters.into_filter_set()?;
     let http_client = build_http_client(cli.timeout, &config)?;
-
     let sources = build_sources(&filter_set, &http_client, cli.api_key.as_deref(), &config);
 
-    if cli.no_tui {
-        run_batch(filter_set, sources, cli.output, cli.format, cli.quiet).await
+    let disk_cache = if cli.no_cache {
+        None
     } else {
-        run_tui(filter_set, sources, config).await
+        let ttl = config.general.cache_ttl_minutes;
+        DiskCache::new(Config::cache_dir(), ttl).ok().map(Arc::new)
+    };
+
+    if cli.no_tui {
+        run_batch(filter_set, sources, cli.output, cli.format, cli.quiet, disk_cache).await
+    } else {
+        run_tui(filter_set, sources, config, disk_cache).await
     }
+}
+
+fn dispatch_subcommand(
+    cmd: Commands,
+    config_path: &PathBuf,
+    config: &Config,
+) -> anyhow::Result<()> {
+    match cmd {
+        Commands::Keys(args) => match args.action {
+            KeysAction::Set { source, key } => {
+                Config::set_key(config_path, &source, &key)?;
+                println!("Key set for '{}'.", source);
+            }
+            KeysAction::List => {
+                println!("Configured API keys ({}):", config_path.display());
+                Config::list_keys(config);
+            }
+            KeysAction::Remove { source } => {
+                Config::remove_key(config_path, &source)?;
+                println!("Key removed for '{}'.", source);
+            }
+        },
+        Commands::Cache(args) => match args.action {
+            CacheAction::Clear => {
+                let cache = DiskCache::new(Config::cache_dir(), 60)?;
+                let n = cache.clear()?;
+                println!("Cleared {} cache entries.", n);
+            }
+            CacheAction::Stats => {
+                let cache = DiskCache::new(Config::cache_dir(), 60)?;
+                let (count, bytes) = cache.stats();
+                println!(
+                    "Cache: {} entries, {:.1} KB on disk",
+                    count,
+                    bytes as f64 / 1024.0
+                );
+                println!("Location: {}", Config::cache_dir().display());
+            }
+        },
+    }
+    Ok(())
 }
 
 fn build_http_client(timeout_secs: u64, config: &Config) -> anyhow::Result<reqwest::Client> {
@@ -103,24 +204,34 @@ fn build_sources(
 ) -> Vec<Arc<dyn PaperSource>> {
     let mut sources: Vec<Arc<dyn PaperSource>> = Vec::new();
 
+    // Key resolution order: CLI --api-key → env var → config.toml
+    let semantic_key = Config::resolve_key(
+        api_key_override,
+        "PAPYRUS_SEMANTIC_KEY",
+        config.api_keys.semantic_scholar.as_deref(),
+    );
+    let pubmed_key = Config::resolve_key(
+        api_key_override,
+        "PAPYRUS_PUBMED_KEY",
+        config.api_keys.pubmed.as_deref(),
+    );
+
     for src in &filter_set.sources {
         match src {
             PaperSourceKind::Arxiv => {
                 sources.push(Arc::new(ArxivSource::new(client.clone())));
             }
             PaperSourceKind::SemanticScholar => {
-                let key = api_key_override
-                    .map(String::from)
-                    .or_else(|| config.api_keys.semantic_scholar.clone())
-                    .filter(|k| !k.is_empty());
-                sources.push(Arc::new(SemanticScholarSource::new(client.clone(), key)));
+                sources.push(Arc::new(SemanticScholarSource::new(
+                    client.clone(),
+                    semantic_key.clone(),
+                )));
             }
             PaperSourceKind::PubMed => {
-                let key = api_key_override
-                    .map(String::from)
-                    .or_else(|| config.api_keys.pubmed.clone())
-                    .filter(|k| !k.is_empty());
-                sources.push(Arc::new(PubMedSource::new(client.clone(), key)));
+                sources.push(Arc::new(PubMedSource::new(
+                    client.clone(),
+                    pubmed_key.clone(),
+                )));
             }
             PaperSourceKind::CrossRef => {
                 let email = if config.network.polite_email.is_empty() {
@@ -141,23 +252,41 @@ async fn run_batch(
     output: Option<PathBuf>,
     format_override: Option<String>,
     quiet: bool,
+    disk_cache: Option<Arc<DiskCache>>,
 ) -> anyhow::Result<()> {
     let mut all_papers: Vec<Paper> = Vec::new();
     let mut had_error = false;
 
     for source in &sources {
-        if !quiet {
-            eprintln!("[papyrus] Fetching from {}…", source.name());
+        let name = source.name();
+        let cache_key = DiskCache::cache_key(&filter_set, name);
+
+        // Try cache first
+        if let Some(ref dc) = disk_cache {
+            if let Some((papers, _)) = dc.get(&cache_key) {
+                if !quiet {
+                    eprintln!("[papyrus] {} → {} papers (cached)", name, papers.len());
+                }
+                all_papers.extend(papers);
+                continue;
+            }
         }
-        match source.fetch(&filter_set, 0).await {
+
+        if !quiet {
+            eprintln!("[papyrus] Fetching from {}…", name);
+        }
+        match fetch_with_retry(source.clone(), filter_set.clone(), 0, None, name.to_string()).await {
             Ok(result) => {
                 if !quiet {
-                    eprintln!("[papyrus] {} → {} papers", source.name(), result.papers.len());
+                    eprintln!("[papyrus] {} → {} papers", name, result.papers.len());
+                }
+                if let Some(ref dc) = disk_cache {
+                    let _ = dc.put(&cache_key, &result.papers, result.total_count);
                 }
                 all_papers.extend(result.papers);
             }
             Err(e) => {
-                eprintln!("[papyrus] {} error: {}", source.name(), e);
+                eprintln!("[papyrus] {} error: {}", name, e);
                 had_error = true;
             }
         }
@@ -206,6 +335,7 @@ async fn run_tui(
     filter_set: filters::FilterSet,
     sources: Vec<Arc<dyn PaperSource>>,
     _config: Config,
+    disk_cache: Option<Arc<DiskCache>>,
 ) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -224,14 +354,15 @@ async fn run_tui(
         let tx = app.event_tx.clone();
         let srcs = sources.clone();
         let fs = filter_set.clone();
+        let dc = disk_cache.clone();
         let _ = tx.send(AppEvent::SearchStarted);
         tokio::spawn(async move {
-            fetch_all(&srcs, &fs, 0, tx).await;
+            fetch_all(&srcs, &fs, 0, tx, dc).await;
         });
         app.is_fetching = true;
     }
 
-    let result = run_tui_loop(&mut terminal, &mut app, sources).await;
+    let result = run_tui_loop(&mut terminal, &mut app, sources, disk_cache.clone()).await;
 
     disable_raw_mode()?;
     execute!(
@@ -248,6 +379,7 @@ async fn run_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     sources: Arc<Vec<Arc<dyn PaperSource>>>,
+    disk_cache: Option<Arc<DiskCache>>,
 ) -> anyhow::Result<()> {
     loop {
         terminal.draw(|f| ui::render(f, app))?;
@@ -267,26 +399,30 @@ async fn run_tui_loop(
                         KeyAction::Search(fs) => {
                             let tx = app.event_tx.clone();
                             let srcs = sources.clone();
+                            let dc = disk_cache.clone();
                             let page = app.page;
                             app.is_fetching = true;
                             app.papers.clear();
+                            app.cached_sources.clear();
                             app.status_message = "Searching…".to_string();
                             let _ = tx.send(AppEvent::SearchStarted);
                             tokio::spawn(async move {
-                                fetch_all(&srcs, &fs, page, tx).await;
+                                fetch_all(&srcs, &fs, page, tx, dc).await;
                             });
                         }
                         KeyAction::Refresh => {
                             let fs = app.filters.clone();
                             let tx = app.event_tx.clone();
                             let srcs = sources.clone();
+                            let dc = disk_cache.clone();
                             let page = app.page;
                             app.is_fetching = true;
                             app.papers.clear();
+                            app.cached_sources.clear();
                             app.status_message = "Refreshing…".to_string();
                             let _ = tx.send(AppEvent::SearchStarted);
                             tokio::spawn(async move {
-                                fetch_all(&srcs, &fs, page, tx).await;
+                                fetch_all(&srcs, &fs, page, tx, dc).await;
                             });
                         }
                         KeyAction::Export => {
@@ -310,13 +446,17 @@ fn handle_app_event(app: &mut App, ev: AppEvent) {
         AppEvent::SearchStarted => {
             app.is_fetching = true;
         }
-        AppEvent::PapersReceived(papers, total, source_name) => {
+        AppEvent::PapersReceived(papers, total, source_name, from_cache) => {
+            if from_cache {
+                app.cached_sources.insert(source_name.clone());
+            }
             app.papers.extend(papers);
             app.papers = deduplicate(std::mem::take(&mut app.papers));
             if let Some(t) = total {
                 app.total_count = Some(t.max(app.total_count.unwrap_or(0)));
             }
-            app.status_message = format!("Loaded {} papers ({})", app.papers.len(), source_name);
+            let cache_label = if from_cache { " (cached)" } else { "" };
+            app.status_message = format!("Loaded {} papers ({}{})", app.papers.len(), source_name, cache_label);
         }
         AppEvent::SearchCompleted => {
             app.is_fetching = false;
@@ -331,7 +471,10 @@ fn handle_app_event(app: &mut App, ev: AppEvent) {
         }
         AppEvent::SearchError(source, msg) => {
             app.fetch_errors.push(format!("{}: {}", source, msg));
-            app.status_message = format!("⚠ {} error: {}", source, msg);
+            app.status_message = format!("⚠ {}: {}", source, msg);
+        }
+        AppEvent::StatusUpdate(msg) => {
+            app.status_message = msg;
         }
         AppEvent::Quit => {}
     }
@@ -676,19 +819,35 @@ async fn fetch_all(
     fs: &filters::FilterSet,
     page: u32,
     tx: mpsc::UnboundedSender<AppEvent>,
+    disk_cache: Option<Arc<DiskCache>>,
 ) {
     let mut handles = Vec::new();
     for source in sources.iter().cloned() {
         let fs = fs.clone();
         let tx = tx.clone();
+        let dc = disk_cache.clone();
         handles.push(tokio::spawn(async move {
             let name = source.name().to_string();
-            match source.fetch(&fs, page).await {
+            let cache_key = DiskCache::cache_key(&fs, &name);
+
+            // Serve from cache when available
+            if let Some(ref disk_cache) = dc {
+                if let Some((papers, total)) = disk_cache.get(&cache_key) {
+                    let _ = tx.send(AppEvent::PapersReceived(papers, total, name, true));
+                    return;
+                }
+            }
+
+            match fetch_with_retry(source, fs, page, Some(tx.clone()), name.clone()).await {
                 Ok(result) => {
+                    if let Some(ref disk_cache) = dc {
+                        let _ = disk_cache.put(&cache_key, &result.papers, result.total_count);
+                    }
                     let _ = tx.send(AppEvent::PapersReceived(
                         result.papers,
                         result.total_count,
                         name,
+                        false,
                     ));
                 }
                 Err(e) => {
@@ -701,6 +860,38 @@ async fn fetch_all(
         let _ = h.await;
     }
     let _ = tx.send(AppEvent::SearchCompleted);
+}
+
+/// Fetch from a source with one automatic retry on HTTP 429.
+async fn fetch_with_retry(
+    source: Arc<dyn PaperSource>,
+    fs: filters::FilterSet,
+    page: u32,
+    tx: Option<mpsc::UnboundedSender<AppEvent>>,
+    name: String,
+) -> anyhow::Result<models::SearchResult> {
+    match source.fetch(&fs, page).await {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            if let Some(PapyrusError::RateLimited { retry_after_secs, .. }) =
+                e.downcast_ref::<PapyrusError>()
+            {
+                let wait = *retry_after_secs;
+                if let Some(ref tx) = tx {
+                    let _ = tx.send(AppEvent::StatusUpdate(format!(
+                        "[{}] rate limited — retrying in {}s",
+                        name, wait
+                    )));
+                } else {
+                    eprintln!("[papyrus] [{}] rate limited — retrying in {}s", name, wait);
+                }
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+                source.fetch(&fs, page).await
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 fn copy_to_clipboard(text: &str) {

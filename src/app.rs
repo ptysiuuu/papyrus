@@ -6,9 +6,12 @@ use crate::models::Paper;
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     SearchStarted,
-    PapersReceived(Vec<Paper>, Option<u64>, String), // papers, total, source_name
+    /// papers, total, source_name, from_cache
+    PapersReceived(Vec<Paper>, Option<u64>, String, bool),
     SearchCompleted,
-    SearchError(String, String), // source, message
+    SearchError(String, String),
+    /// Temporary status bar message (e.g. rate-limit warning)
+    StatusUpdate(String),
     Quit,
 }
 
@@ -56,6 +59,8 @@ pub struct App {
     pub event_tx: mpsc::UnboundedSender<AppEvent>,
     pub event_rx: mpsc::UnboundedReceiver<AppEvent>,
     pub sources_status: Vec<(String, SourceStatus)>,
+    /// Source names whose results came from the disk cache this session.
+    pub cached_sources: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +119,7 @@ impl App {
             event_tx: tx,
             event_rx: rx,
             sources_status: Vec::new(),
+            cached_sources: std::collections::HashSet::new(),
         }
     }
 

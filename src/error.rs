@@ -8,8 +8,8 @@ pub enum PapyrusError {
     #[error("Parse error: {0}")]
     Parse(String),
 
-    #[error("Rate limited by {src}, backing off")]
-    RateLimited { src: String },
+    #[error("[{src}] rate limited — retry in {retry_after_secs}s")]
+    RateLimited { src: String, retry_after_secs: u64 },
 
     #[error("Timeout contacting {src}")]
     Timeout { src: String },

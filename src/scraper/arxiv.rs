@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::NaiveDate;
 use quick_xml::events::Event;
@@ -6,16 +8,18 @@ use reqwest::Client;
 
 use crate::filters::{FilterSet, SortOrder};
 use crate::models::{Author, Paper, PaperSourceKind, SearchResult};
+use crate::ratelimit::{self, Limiter};
 
 use super::PaperSource;
 
 pub struct ArxivSource {
     client: Client,
+    limiter: Arc<Limiter>,
 }
 
 impl ArxivSource {
     pub fn new(client: Client) -> Self {
-        Self { client }
+        Self { client, limiter: ratelimit::arxiv() }
     }
 
     fn build_query(filters: &FilterSet) -> String {
@@ -81,7 +85,16 @@ impl PaperSource for ArxivSource {
             )
         };
 
+        ratelimit::throttle(&self.limiter).await;
         let resp = self.client.get(&url).send().await?;
+        if resp.status().as_u16() == 429 {
+            let retry = retry_after(&resp);
+            return Err(crate::error::PapyrusError::RateLimited {
+                src: "arXiv".to_string(),
+                retry_after_secs: retry,
+            }
+            .into());
+        }
         let body = resp.text().await?;
 
         let papers = parse_arxiv_atom(&body)?;
@@ -317,6 +330,14 @@ impl PaperBuilder {
         paper.is_open_access = true; // arXiv papers are always open access
         Some(paper)
     }
+}
+
+fn retry_after(resp: &reqwest::Response) -> u64 {
+    resp.headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5)
 }
 
 // Inline URL encoding to avoid extra dependency

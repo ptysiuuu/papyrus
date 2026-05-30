@@ -1,21 +1,26 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::NaiveDate;
 use reqwest::Client;
 use serde::Deserialize;
 
+use crate::error::PapyrusError;
 use crate::filters::{FilterSet, SortOrder};
 use crate::models::{Author, Paper, PaperSourceKind, SearchResult};
+use crate::ratelimit::{self, Limiter};
 
 use super::PaperSource;
 
 pub struct CrossRefSource {
     client: Client,
     polite_email: Option<String>,
+    limiter: Arc<Limiter>,
 }
 
 impl CrossRefSource {
     pub fn new(client: Client, polite_email: Option<String>) -> Self {
-        Self { client, polite_email }
+        Self { client, polite_email, limiter: ratelimit::crossref() }
     }
 }
 
@@ -207,6 +212,7 @@ impl PaperSource for CrossRefSource {
         // DOI lookup
         if let Some(doi) = &filters.doi {
             let url = format!("https://api.crossref.org/works/{}", urlencoding(doi));
+            ratelimit::throttle(&self.limiter).await;
             let resp = self.client.get(&url).send().await?;
             if resp.status().is_success() {
                 #[derive(Deserialize)]
@@ -276,7 +282,21 @@ impl PaperSource for CrossRefSource {
         }
 
         let url = format!("https://api.crossref.org/works?{}", params.join("&"));
+        ratelimit::throttle(&self.limiter).await;
         let resp = self.client.get(&url).send().await?;
+        if resp.status().as_u16() == 429 {
+            let retry = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5);
+            return Err(PapyrusError::RateLimited {
+                src: "CrossRef".to_string(),
+                retry_after_secs: retry,
+            }
+            .into());
+        }
         let body: CrResponse = resp.json().await?;
 
         let total = body.message.total_results;
