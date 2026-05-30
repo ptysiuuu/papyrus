@@ -5,6 +5,7 @@ mod config;
 mod error;
 mod export;
 mod filters;
+mod mcp;
 mod models;
 mod ratelimit;
 mod scraper;
@@ -16,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
@@ -52,6 +53,9 @@ struct Cli {
     #[arg(long = "no-tui")]
     no_tui: bool,
 
+    #[arg(long, value_enum, default_value = "json", requires = "no_tui")]
+    output_mode: OutputMode,
+
     #[arg(long)]
     quiet: bool,
 
@@ -77,12 +81,35 @@ struct Cli {
     verbose: bool,
 }
 
+#[derive(Debug, Clone, ValueEnum, Default)]
+enum OutputMode {
+    #[default]
+    Json,
+    Jsonl,
+    Pretty,
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Manage API keys stored in config.toml
     Keys(KeysArgs),
     /// Cache management
     Cache(CacheArgs),
+    /// Start an MCP server over stdio (for use with Claude Code and other MCP hosts)
+    Serve,
+    /// Print JSON schema for tool input/output
+    Schema {
+        /// Which schema to print: input, output, or all
+        #[arg(value_enum, default_value = "all")]
+        which: SchemaTarget,
+    },
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum SchemaTarget {
+    Input,
+    Output,
+    All,
 }
 
 #[derive(clap::Args, Debug)]
@@ -124,13 +151,33 @@ async fn main() -> anyhow::Result<()> {
         Config::default()
     });
 
-    // Handle subcommands before anything else
+    let http_client = build_http_client(cli.timeout, &config)?;
+
+    // Subcommands that need sources (serve) or no sources (schema, keys, cache)
     if let Some(cmd) = cli.command {
-        return dispatch_subcommand(cmd, &config_path, &config);
+        match cmd {
+            Commands::Serve => {
+                let filter_set = filters::FilterSet::default();
+                let sources = build_sources(&filter_set, &http_client, cli.api_key.as_deref(), &config);
+                let disk_cache = if cli.no_cache {
+                    None
+                } else {
+                    DiskCache::new(Config::cache_dir(), config.general.cache_ttl_minutes)
+                        .ok()
+                        .map(Arc::new)
+                };
+                return mcp::run_mcp_server(sources, disk_cache).await;
+            }
+            Commands::Schema { which } => {
+                return print_schema(which);
+            }
+            other => {
+                return dispatch_subcommand(other, &config_path, &config);
+            }
+        }
     }
 
     let filter_set = cli.filters.into_filter_set()?;
-    let http_client = build_http_client(cli.timeout, &config)?;
     let sources = build_sources(&filter_set, &http_client, cli.api_key.as_deref(), &config);
 
     let disk_cache = if cli.no_cache {
@@ -141,10 +188,26 @@ async fn main() -> anyhow::Result<()> {
     };
 
     if cli.no_tui {
-        run_batch(filter_set, sources, cli.output, cli.format, cli.quiet, disk_cache).await
+        run_batch(filter_set, sources, cli.output, cli.format, cli.quiet, cli.output_mode, disk_cache).await
     } else {
         run_tui(filter_set, sources, config, disk_cache).await
     }
+}
+
+fn print_schema(which: SchemaTarget) -> anyhow::Result<()> {
+    use schemars::schema_for;
+    let input_schema = serde_json::to_value(schema_for!(filters::FilterSet))?;
+    let output_schema = serde_json::to_value(schema_for!(models::Paper))?;
+    let out = match which {
+        SchemaTarget::Input => serde_json::to_string_pretty(&input_schema)?,
+        SchemaTarget::Output => serde_json::to_string_pretty(&output_schema)?,
+        SchemaTarget::All => serde_json::to_string_pretty(&serde_json::json!({
+            "input": input_schema,
+            "output": output_schema,
+        }))?,
+    };
+    println!("{}", out);
+    Ok(())
 }
 
 fn dispatch_subcommand(
@@ -184,6 +247,8 @@ fn dispatch_subcommand(
                 println!("Location: {}", Config::cache_dir().display());
             }
         },
+        // Serve and Schema are handled before dispatch_subcommand is called
+        Commands::Serve | Commands::Schema { .. } => unreachable!(),
     }
     Ok(())
 }
@@ -252,47 +317,82 @@ async fn run_batch(
     output: Option<PathBuf>,
     format_override: Option<String>,
     quiet: bool,
+    output_mode: OutputMode,
     disk_cache: Option<Arc<DiskCache>>,
 ) -> anyhow::Result<()> {
     let mut all_papers: Vec<Paper> = Vec::new();
-    let mut had_error = false;
+    let mut sources_hit: Vec<String> = Vec::new();
+    let mut sources_degraded: Vec<String> = Vec::new();
+    let mut all_rate_limited = true;
+    let mut any_source_tried = false;
 
     for source in &sources {
         let name = source.name();
         let cache_key = DiskCache::cache_key(&filter_set, name);
+        any_source_tried = true;
 
         // Try cache first
         if let Some(ref dc) = disk_cache {
             if let Some((papers, _)) = dc.get(&cache_key) {
                 if !quiet {
-                    eprintln!("[papyrus] {} → {} papers (cached)", name, papers.len());
+                    eprintln!("[papyrus] {} -> {} papers (cached)", name, papers.len());
                 }
+                if matches!(output_mode, OutputMode::Jsonl) && output.is_none() {
+                    for p in &papers {
+                        println!("{}", serde_json::to_string(p).unwrap_or_default());
+                    }
+                }
+                sources_hit.push(name.to_string());
                 all_papers.extend(papers);
+                all_rate_limited = false;
                 continue;
             }
         }
 
         if !quiet {
-            eprintln!("[papyrus] Fetching from {}…", name);
+            eprintln!("[papyrus] Fetching from {}...", name);
         }
         match fetch_with_retry(source.clone(), filter_set.clone(), 0, None, name.to_string()).await {
             Ok(result) => {
                 if !quiet {
-                    eprintln!("[papyrus] {} → {} papers", name, result.papers.len());
+                    eprintln!("[papyrus] {} -> {} papers", name, result.papers.len());
                 }
                 if let Some(ref dc) = disk_cache {
                     let _ = dc.put(&cache_key, &result.papers, result.total_count);
                 }
+                if matches!(output_mode, OutputMode::Jsonl) && output.is_none() {
+                    for p in &result.papers {
+                        println!("{}", serde_json::to_string(p).unwrap_or_default());
+                    }
+                }
+                sources_hit.push(name.to_string());
                 all_papers.extend(result.papers);
+                all_rate_limited = false;
             }
             Err(e) => {
+                let is_rl = e.downcast_ref::<error::PapyrusError>()
+                    .map_or(false, |pe| matches!(pe, error::PapyrusError::RateLimited { .. }));
                 eprintln!("[papyrus] {} error: {}", name, e);
-                had_error = true;
+                sources_degraded.push(format!("{}: {}", name, e));
+                if !is_rl {
+                    all_rate_limited = false;
+                }
             }
         }
     }
 
     all_papers = deduplicate(all_papers);
+
+    // Emit JSONL metadata line last
+    if matches!(output_mode, OutputMode::Jsonl) && output.is_none() {
+        let meta = serde_json::json!({
+            "__meta": true,
+            "total": all_papers.len(),
+            "sources_hit": sources_hit,
+            "sources_degraded": sources_degraded,
+        });
+        println!("{}", serde_json::to_string(&meta).unwrap_or_default());
+    }
 
     if let Some(ref path) = output {
         let fmt = format_override
@@ -308,15 +408,42 @@ async fn run_batch(
         if !quiet {
             eprintln!("[papyrus] Exported {} papers to {:?}", all_papers.len(), path);
         }
-    } else {
-        let json = serde_json::to_string_pretty(&all_papers)?;
-        println!("{}", json);
+    } else if !matches!(output_mode, OutputMode::Jsonl) {
+        match output_mode {
+            OutputMode::Json => {
+                println!("{}", serde_json::to_string_pretty(&all_papers)?);
+            }
+            OutputMode::Pretty => {
+                print_pretty_table(&all_papers);
+            }
+            OutputMode::Jsonl => {}
+        }
     }
 
+    // Exit codes per spec Section 17.3
+    let had_error = !sources_degraded.is_empty();
+    if all_papers.is_empty() && had_error {
+        if any_source_tried && all_rate_limited {
+            std::process::exit(4); // all sources rate limited
+        }
+        std::process::exit(2); // total failure
+    }
     if had_error {
-        std::process::exit(1);
+        std::process::exit(1); // partial success
     }
     Ok(())
+}
+
+fn print_pretty_table(papers: &[Paper]) {
+    println!("{:>4}  {:<60}  {:>4}  {:<12}  {:>6}", "#", "Title", "Year", "Source", "Cites");
+    println!("{}", "-".repeat(95));
+    for (i, p) in papers.iter().enumerate() {
+        let title: String = p.title.chars().take(60).collect();
+        let year = p.year().map(|y| y.to_string()).unwrap_or_else(|| "    ".to_string());
+        let src = p.source.to_string();
+        let cites = p.citation_count.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string());
+        println!("{:>4}  {:<60}  {:>4}  {:<12}  {:>6}", i + 1, title, year, src, cites);
+    }
 }
 
 fn deduplicate(papers: Vec<Paper>) -> Vec<Paper> {

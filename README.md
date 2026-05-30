@@ -1,7 +1,7 @@
 #  papyrus
 
 <p align="center">
-  <strong>Search academic papers from your terminal  -  fast, filterable, exportable.</strong>
+  <strong>Search academic papers from your terminal  -  fast, filterable, exportable, agent-ready.</strong>
 </p>
 
 <p align="center">
@@ -12,7 +12,7 @@
 <p align="center">
   A Ratatui TUI that queries arXiv, Semantic Scholar, PubMed, and CrossRef simultaneously.<br>
   Navigate with vim keys · view abstracts inline · copy DOIs · open PDFs · export to JSON, CSV, or BibTeX.<br>
-  Responses are cached to disk. Per-source rate limits are enforced automatically.
+  Responses are cached to disk. Per-source rate limits enforced. MCP server built in.
 </p>
 
 <!-- demo gif here -->
@@ -74,6 +74,12 @@ papyrus -q "large language models" --from 2024 --has-pdf
 # Headless / pipeline mode
 papyrus --no-tui -q "diffusion models" -n 50 | jq '.[].pdf_url'
 
+# Stream results line by line (NDJSON)
+papyrus --no-tui --output-mode jsonl -q "diffusion models" -n 50
+
+# MCP server for Claude Code / other agents
+papyrus serve
+
 # Force fresh fetch, skip cache
 papyrus -q "transformers" --no-cache
 ```
@@ -132,7 +138,8 @@ papyrus -q "transformers" --no-cache
 | `--sort` | | String | `relevance` (default), `date-desc`, `date-asc`, `citations-desc` |
 | `--output` | `-o` | Path | Export file. Extension sets format: `.json`, `.csv`, `.bib` |
 | `--format` | `-f` | String | Override export format: `json`, `csv`, `bibtex` |
-| `--no-tui` | | flag | Headless mode  -  print JSON to stdout |
+| `--no-tui` | | flag | Headless mode  -  print to stdout |
+| `--output-mode` | | String | Output format in `--no-tui`: `json` (default), `jsonl`, `pretty` |
 | `--quiet` | | flag | Suppress progress output in `--no-tui` mode |
 | `--no-cache` | | flag | Bypass disk cache and force a fresh fetch |
 
@@ -167,6 +174,22 @@ Keys are written to `~/.config/papyrus/config.toml` under `[api_keys]`. Valid so
 ```bash
 papyrus cache stats   # entry count and disk usage
 papyrus cache clear   # delete all cached responses
+```
+
+### `papyrus serve`  -  MCP server
+
+```bash
+papyrus serve         # start MCP server over stdio
+```
+
+Exposes `search_papers`, `get_paper`, and `export_papers` as MCP tools. See the [agent integration](#agent-integration) section for host config.
+
+### `papyrus schema`  -  JSON schema
+
+```bash
+papyrus schema input    # search filter schema
+papyrus schema output   # paper output schema
+papyrus schema all      # both, as { "input": ..., "output": ... }
 ```
 
 ---
@@ -294,6 +317,84 @@ papyrus -q "..." --no-cache      # bypass cache for this run
 | [Semantic Scholar](https://api.semanticscholar.org/) | JSON REST | Optional  -  [get one](https://www.semanticscholar.org/product/api) |
 | [PubMed](https://www.ncbi.nlm.nih.gov/home/develop/api/) | XML E-utilities | Optional  -  [get one](https://www.ncbi.nlm.nih.gov/account/) |
 | [CrossRef](https://www.crossref.org/documentation/retrieve-metadata/rest-api/) | JSON REST | Not required (set `polite_email` for priority) |
+
+---
+
+## Agent integration
+
+papyrus exposes a first-class interface for AI agents and shell scripts.
+
+### MCP server (Claude Code, any MCP host)
+
+`papyrus serve` launches an MCP server over stdio. Add it to your MCP host config once and call its tools from any conversation:
+
+```json
+{
+  "mcpServers": {
+    "papyrus": {
+      "command": "papyrus",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+Three tools are exposed:
+
+| Tool | Description |
+|------|-------------|
+| `search_papers` | Search across all configured sources; returns full paper objects |
+| `get_paper` | Fetch a single paper by DOI, arXiv ID, or PubMed ID |
+| `export_papers` | Export paper IDs from a previous search to JSON / CSV / BibTeX |
+
+Full input/output schemas are registered in the tool manifest so the host can auto-generate parameters without hardcoding them.
+
+### JSON schema subcommand
+
+```bash
+papyrus schema input    # FilterSet schema  -  what search_papers accepts
+papyrus schema output   # Paper schema  -  what search_papers returns
+papyrus schema all      # Both, as { "input": ..., "output": ... }
+```
+
+Agents can call this once at startup to learn the interface dynamically.
+
+### Output modes (`--no-tui` only)
+
+| Mode | Description |
+|------|-------------|
+| `--output-mode json` | Array of Paper objects. Default. |
+| `--output-mode jsonl` | One Paper object per line (NDJSON), emitted per-source as results arrive. Final line is a `{"__meta": true, ...}` summary. |
+| `--output-mode pretty` | Human-readable table: index, title, year, source, citations. |
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Full success  -  all sources responded |
+| `1` | Partial success  -  some sources failed; results from others are in stdout |
+| `2` | Total failure  -  no results from any source |
+| `3` | Input error  -  bad arguments or config (JSON error on stderr) |
+| `4` | Rate limited  -  all sources hit rate limits |
+
+Exit code 1 is not a reason to abort. Inspect `sources_degraded` in the JSONL `__meta` line and decide whether to retry the missing sources.
+
+### Shell / script agents
+
+```bash
+# Discover the schema first
+papyrus schema input > /tmp/papyrus_input_schema.json
+
+# Stream results as they arrive, skip the meta line
+papyrus --no-tui --output-mode jsonl -q "attention mechanism" --from 2023 \
+  | while IFS= read -r line; do
+      echo "$line" | jq 'select(.__meta == null) | .title'
+    done
+
+# Check exit code for partial failure
+papyrus --no-tui -q "transformers" -s all -n 100 -o results.bib
+[ $? -eq 1 ] && echo "Warning: some sources failed, results may be incomplete"
+```
 
 ---
 

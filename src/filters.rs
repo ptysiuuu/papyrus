@@ -1,10 +1,11 @@
 use chrono::{NaiveDate, Local, Duration, Datelike};
 use clap::Args;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::models::PaperSourceKind;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, JsonSchema)]
 pub enum SortOrder {
     #[default]
     Relevance,
@@ -37,7 +38,7 @@ impl std::str::FromStr for SortOrder {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FilterSet {
     pub query: Option<String>,
     pub title_query: Option<String>,

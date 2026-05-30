@@ -1,8 +1,9 @@
 use chrono::{Datelike, NaiveDate};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PaperSourceKind {
     Arxiv,
@@ -22,14 +23,17 @@ impl std::fmt::Display for PaperSourceKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Author {
+    #[schemars(description = "Full name of the author")]
     pub name: String,
+    #[schemars(description = "Author's institutional affiliation")]
     pub affiliation: Option<String>,
+    #[schemars(description = "ORCID identifier")]
     pub orcid: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Paper {
     pub id: String,
     pub source: PaperSourceKind,
