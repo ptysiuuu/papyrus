@@ -1,0 +1,12 @@
+CLAUDE.md
+SPEC_research_paper_scraper.md
+
+# Cargo
+/target
+Cargo.lock
+
+# Config/output artifacts
+*.json
+*.csv
+*.bib
+papers/
