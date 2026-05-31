@@ -48,18 +48,10 @@
 ## Installation
 
 ```bash
-cargo install papyrus
-```
-
-Or build from source:
-
-```bash
 git clone https://github.com/ptysiuuu/papyrus
 cd papyrus
-cargo build --release
-./target/release/papyrus
+cargo install --path .
 ```
-
 ---
 
 ## Quick start
