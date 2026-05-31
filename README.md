@@ -25,7 +25,7 @@
 ├────────────────────────────┬──────────────────────────────────────────┤
 │  Results (47 found)        │  Detail View                             │
 │  ──────────────────        │  ─────────────────────────────────       │
-│  1. Scaling Laws for...   │  Title:      Scaling Laws for Neural...   │
+│  1. Scaling Laws for...    │  Title:      Scaling Laws for Neural...  │
 │   2. Neural Scaling and... │  Authors:    Hoffmann, J. et al.         │
 │   3. Emergent Abilities... │  Date:       2022-03-29                  │
 │   4. Training Compute-...  │  Source:     arXiv [2203.15556]          │
