@@ -18,29 +18,29 @@
 <!-- demo gif here -->
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  papyrus  v0.1.0         [arXiv] [S2] [PubMed] [CrossRef]  ⠙ fetching│
-├──────────────────────────────────────────────────────────────────────┤
-│  Filters: [q: "neural scaling"] [from: 2023] [has-pdf] [cat: cs.AI] │
-├────────────────────────────┬─────────────────────────────────────────┤
-│  Results (47 found)        │  Detail View                            │
-│  ──────────────────        │  ─────────────────────────────────      │
-│  1. Scaling Laws for...   │  Title:      Scaling Laws for Neural... │
-│   2. Neural Scaling and... │  Authors:    Hoffmann, J. et al.        │
-│   3. Emergent Abilities... │  Date:       2022-03-29                 │
-│   4. Training Compute-...  │  Source:     arXiv [2203.15556]         │
-│   5. Beyond Neural Scal... │  Citations:  1,842                      │
-│   6. Revisiting Scaling... │  Categories: cs.LG, cs.CL               │
-│                            │  Journal:     -                           │
-│                            │  DOI:        10.48550/arXiv.2203.15556  │
-│                            │                                         │
-│                            │  Abstract:                              │
-│                            │  We investigate the optimal...          │
-│                            │                                         │
-│                            │  [p] PDF  [Enter] HTML  [b] BibTeX      │
-├────────────────────────────┴─────────────────────────────────────────┤
-│  [/] Search  [f] Filters  [e] Export  [r] Refresh  [q] Quit  [?] Help│
-└──────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│  papyrus  v0.1.0         [arXiv] [S2] [PubMed] [CrossRef]   fetching  │
+├───────────────────────────────────────────────────────────────────────┤
+│  Filters: [q: "neural scaling"] [from: 2023] [has-pdf] [cat: cs.AI]   │
+├────────────────────────────┬──────────────────────────────────────────┤
+│  Results (47 found)        │  Detail View                             │
+│  ──────────────────        │  ─────────────────────────────────       │
+│  1. Scaling Laws for...   │  Title:      Scaling Laws for Neural...   │
+│   2. Neural Scaling and... │  Authors:    Hoffmann, J. et al.         │
+│   3. Emergent Abilities... │  Date:       2022-03-29                  │
+│   4. Training Compute-...  │  Source:     arXiv [2203.15556]          │
+│   5. Beyond Neural Scal... │  Citations:  1,842                       │
+│   6. Revisiting Scaling... │  Categories: cs.LG, cs.CL                │
+│                            │  Journal:     -                          │
+│                            │  DOI:        10.48550/arXiv.2203.15556   │
+│                            │                                          │
+│                            │  Abstract:                               │
+│                            │  We investigate the optimal...           │
+│                            │                                          │
+│                            │  [p] PDF  [Enter] HTML  [b] BibTeX       │
+├────────────────────────────┴──────────────────────────────────────────┤
+│  [/] Search  [f] Filters  [e] Export  [r] Refresh  [q] Quit  [?] Help │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
