@@ -26,13 +26,25 @@ impl ArxivSource {
         let mut parts: Vec<String> = Vec::new();
 
         if let Some(q) = &filters.query {
-            parts.push(format!("all:{}", q));
+            if q.contains(' ') {
+                // Multi-word: phrase search
+                parts.push(format!("all:\"{}\"", q.replace('"', "")));
+            } else if let Some(expanded) = super::expand_chemical_formula(q) {
+                // Chemical formula: search element names to avoid case-fold collisions
+                // e.g. "LiNe+" → all:lithium AND all:neon
+                let sub: Vec<String> = expanded.split_whitespace()
+                    .map(|w| format!("all:{}", w))
+                    .collect();
+                parts.push(format!("({})", sub.join(" AND ")));
+            } else {
+                parts.push(format!("all:{}", escape_lucene(q)));
+            }
         }
         if let Some(t) = &filters.title_query {
-            parts.push(format!("ti:{}", t));
+            parts.push(format!("ti:{}", escape_lucene(t)));
         }
         if let Some(a) = &filters.abstract_query {
-            parts.push(format!("abs:{}", a));
+            parts.push(format!("abs:{}", escape_lucene(a)));
         }
         for author in &filters.authors {
             parts.push(format!("au:{}", author));
@@ -227,8 +239,8 @@ fn parse_arxiv_atom(xml: &str) -> anyhow::Result<Vec<Paper>> {
                             p.arxiv_id = Some(id.clone());
                             p.source_id = id;
                         }
-                        "title" => p.title = text,
-                        "summary" => p.abstract_text = Some(text),
+                        "title" => p.title = super::clean_latex(&text),
+                        "summary" => p.abstract_text = Some(super::clean_latex(&text)),
                         "published" => {
                             p.published = NaiveDate::parse_from_str(&text[..10], "%Y-%m-%d").ok();
                         }
@@ -338,6 +350,20 @@ fn retry_after(resp: &reqwest::Response) -> u64 {
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse().ok())
         .unwrap_or(5)
+}
+
+fn escape_lucene(s: &str) -> String {
+    // Escape Lucene special chars so they're treated as literals, not operators.
+    // The full set: + - & | ! ( ) { } [ ] ^ " ~ * ? : \ /
+    let mut out = String::with_capacity(s.len() * 2);
+    for c in s.chars() {
+        if matches!(c, '+' | '-' | '&' | '|' | '!' | '(' | ')' | '{' | '}'
+                     | '[' | ']' | '^' | '"' | '~' | '*' | '?' | ':' | '/' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 // Inline URL encoding to avoid extra dependency

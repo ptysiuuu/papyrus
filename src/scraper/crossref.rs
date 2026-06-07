@@ -181,17 +181,76 @@ fn cr_work_to_paper(w: CrWork) -> Option<Paper> {
 }
 
 fn strip_jats_tags(s: &str) -> String {
+    // CrossRef abstracts use JATS XML. Three special cases:
+    //   jats:tex-math  — raw LaTeX; apply clean_latex and emit
+    //   mml:math       — MathML duplicate of tex-math; skip entirely
+    //   jats:sup/sub   — superscript/subscript; convert to Unicode
+    // Everything else: strip the tag, emit the text content as-is.
     let mut out = String::with_capacity(s.len());
-    let mut in_tag = false;
-    for c in s.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(c),
-            _ => {}
+    let mut chars = s.chars().peekable();
+    let mut mml_depth: usize = 0;
+    let mut tex_buf: Option<String> = None;
+    let mut sup_buf: Option<String> = None;
+    let mut sub_buf: Option<String> = None;
+
+    while let Some(c) = chars.next() {
+        if c != '<' {
+            match (mml_depth, &mut tex_buf, &mut sup_buf, &mut sub_buf) {
+                (0, Some(ref mut b), _, _) => b.push(c),
+                (0, _, Some(ref mut b), _) => b.push(c),
+                (0, _, _, Some(ref mut b)) => b.push(c),
+                (0, _, _, _) => out.push(c),
+                _ => {} // inside mml:math — skip
+            }
+            continue;
+        }
+
+        // Read the full tag into a buffer
+        let mut tag = String::new();
+        for tc in chars.by_ref() {
+            if tc == '>' { break; }
+            tag.push(tc);
+        }
+        let tag = tag.trim();
+        let is_close = tag.starts_with('/');
+        let name_part = if is_close { &tag[1..] } else { tag };
+        let tag_name = name_part.split_whitespace().next().unwrap_or("").trim_end_matches('/');
+
+        match tag_name {
+            "mml:math" | "math" => {
+                if !is_close { mml_depth += 1; }
+                else if mml_depth > 0 { mml_depth -= 1; }
+            }
+            "jats:tex-math" | "tex-math" => {
+                if !is_close {
+                    tex_buf = Some(String::new());
+                } else if let Some(buf) = tex_buf.take() {
+                    out.push_str(&super::clean_latex(&buf));
+                }
+            }
+            "jats:sup" | "sup" => {
+                if !is_close {
+                    sup_buf = Some(String::new());
+                } else if let Some(buf) = sup_buf.take() {
+                    for gc in buf.chars() {
+                        out.push(super::to_superscript(gc).unwrap_or(gc));
+                    }
+                }
+            }
+            "jats:sub" | "sub" => {
+                if !is_close {
+                    sub_buf = Some(String::new());
+                } else if let Some(buf) = sub_buf.take() {
+                    for gc in buf.chars() {
+                        out.push(super::to_subscript(gc).unwrap_or(gc));
+                    }
+                }
+            }
+            _ => {} // all other tags: stripped, content emitted normally
         }
     }
-    out.trim().to_string()
+
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[async_trait]
@@ -233,7 +292,8 @@ impl PaperSource for CrossRefSource {
         let mut params: Vec<String> = Vec::new();
 
         if let Some(q) = &filters.query {
-            params.push(format!("query={}", urlencoding(q)));
+            let search_q = super::expand_chemical_formula(q).unwrap_or_else(|| q.clone());
+            params.push(format!("query.bibliographic={}", urlencoding(&search_q)));
         }
         if let Some(t) = &filters.title_query {
             params.push(format!("query.title={}", urlencoding(t)));
@@ -245,7 +305,12 @@ impl PaperSource for CrossRefSource {
         params.push(format!("rows={}", filters.limit));
         params.push(format!("offset={}", offset));
 
-        let mut filter_parts: Vec<String> = Vec::new();
+        let mut filter_parts: Vec<String> = vec![
+            // Restrict to academic document types; excludes books, films, artworks, etc.
+            "type:journal-article".to_string(),
+            "type:proceedings-article".to_string(),
+            "type:book-chapter".to_string(),
+        ];
         if let Some(from) = filters.date_from {
             filter_parts.push(format!("from-pub-date:{}", from.format("%Y-%m-%d")));
         }
@@ -255,9 +320,7 @@ impl PaperSource for CrossRefSource {
         if filters.has_pdf || filters.open_access_only {
             filter_parts.push("has-full-text:true".to_string());
         }
-        if !filter_parts.is_empty() {
-            params.push(format!("filter={}", filter_parts.join(",")));
-        }
+        params.push(format!("filter={}", filter_parts.join(",")));
 
         // Sort
         match filters.sort {
