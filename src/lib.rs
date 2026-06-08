@@ -1,0 +1,20 @@
+#![allow(dead_code)]
+pub mod app;
+pub mod cache;
+pub mod citation_graph;
+pub mod config;
+pub mod db;
+pub mod dedup;
+pub mod download;
+pub mod error;
+pub mod export;
+pub mod filters;
+pub mod library;
+pub mod mcp;
+pub mod models;
+pub mod plugin;
+pub mod ratelimit;
+pub mod scraper;
+pub mod similarity;
+pub mod ui;
+pub mod watch;
