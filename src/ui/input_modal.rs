@@ -249,6 +249,7 @@ pub fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
         ("y", "Copy paper title to clipboard"),
         ("b", "Add paper to BibTeX buffer"),
         ("t", "Add/edit tag on current paper"),
+        ("i", "Save paper to local library"),
         ("Ctrl+F", "Fuzzy-filter current results"),
         ("n", "Fetch next page of results"),
         ("N", "Fetch previous page"),

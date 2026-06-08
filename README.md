@@ -12,14 +12,14 @@
 <p align="center">
   A Ratatui TUI that queries arXiv, Semantic Scholar, PubMed, and CrossRef simultaneously.<br>
   Navigate with vim keys · view abstracts inline · copy DOIs · open PDFs · export to JSON, CSV, or BibTeX.<br>
-  Responses are cached to disk. Per-source rate limits enforced. MCP server built in.
+  Local library · citation graphs · watch mode · PDF downloads · plugin system · MCP server built in.
 </p>
 
 <!-- demo gif here -->
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
-│  papyrus  v0.1.0         [arXiv] [S2] [PubMed] [CrossRef]   fetching  │
+│  papyrus  v1.0.0         [arXiv] [S2] [PubMed] [CrossRef]   fetching  │
 ├───────────────────────────────────────────────────────────────────────┤
 │  Filters: [q: "neural scaling"] [from: 2023] [has-pdf] [cat: cs.AI]   │
 ├────────────────────────────┬──────────────────────────────────────────┤
@@ -60,7 +60,7 @@ cargo install --path .
 # Interactive TUI
 papyrus
 
-# Pre-filled search
+# Pre-filled search (auto-saves results to local library)
 papyrus -q "large language models" --from 2024 --has-pdf
 
 # Headless / pipeline mode
@@ -107,7 +107,7 @@ papyrus -q "transformers" --no-cache
 | `--to` | | String | Published on or before. Same formats as `--from` |
 | `--year` | `-y` | u16 | Shorthand for `--from YYYY --to YYYY` |
 | `--last-days` | | u32 | Papers published in the last N days |
-| `--last-months` | | u32 | Papers published in the last N months |
+| `--last-months` | | u32 | Papers published in the last N months (year-boundary safe) |
 
 ### Quality filters
 
@@ -150,6 +150,167 @@ papyrus -q "transformers" --no-cache
 
 ## Subcommands
 
+### `papyrus library`  -  local paper library
+
+All search results are automatically saved to a local SQLite library at `~/.local/share/papyrus/papyrus.db`. The library supports full-text search, tagging, reading status, notes, and collections.
+
+```bash
+# Full-text search (title + abstract)
+papyrus library search "attention mechanism"
+
+# Include PDF full-text in search (if downloaded)
+papyrus library search "gradient vanishing" --fulltext
+
+# Show library statistics
+papyrus library stats
+
+# Set reading status: unread | reading | read | reviewed
+papyrus library status <paper-id> read
+
+# Add a note
+papyrus library note <paper-id> "Key paper for my lit review section 3"
+
+# Set priority 1–5
+papyrus library priority <paper-id> 5
+
+# Tag a paper (multiple tags)
+papyrus library tag <paper-id> nlp transformers attention
+
+# Remove a tag
+papyrus library untag <paper-id> nlp
+
+# Create and manage collections
+papyrus library create-collection "My Lit Review"
+papyrus library list-collections
+
+# Find potential duplicates
+papyrus library duplicates
+
+# Export a literature review (sorted by priority, then citations)
+papyrus library export-review --output review.json
+papyrus library export-review --output review.bib --format bibtex
+```
+
+Paper IDs are full UUIDs shown in library search output or retrievable from JSON output (`id` field).
+
+### `papyrus cite-graph`  -  citation graph engine
+
+Builds a local citation graph using Semantic Scholar data. Stores nodes and edges in SQLite for offline traversal.
+
+```bash
+# Fetch and store references + citations for a paper (by S2 paper ID)
+papyrus cite-graph fetch <s2-paper-id>
+
+# Walk backwards through references (depth 1 = direct refs)
+papyrus cite-graph ancestors <s2-paper-id> --depth 2
+
+# Walk forward through citations
+papyrus cite-graph descendants <s2-paper-id> --depth 1
+
+# Find shared references between two papers
+papyrus cite-graph common <s2-paper-id-1> <s2-paper-id-2>
+
+# Show highest-cited root nodes in your local graph
+papyrus cite-graph seminal --limit 10
+```
+
+Semantic Scholar paper IDs are the hex IDs returned in `source_id` when searching with `-s semantic`.
+
+### `papyrus watch`  -  watch mode for new papers
+
+Saves persistent queries that can be re-run to detect new papers. Outputs JSONL for piping to cron jobs or notification scripts.
+
+```bash
+# Add a watch (sources: arxiv, semantic_scholar, pubmed, crossref)
+papyrus watch add "diffusion models" --sources "arxiv,semantic_scholar" --name "Diffusion research"
+
+# List saved watches
+papyrus watch list
+
+# Run all watches — prints JSONL for new papers only
+papyrus watch run
+
+# Run in a specific output mode
+papyrus watch run --output-mode jsonl
+
+# Remove a watch by ID
+papyrus watch remove <watch-id>
+```
+
+Each JSONL line from `watch run` includes `__watch_name` and `__watch_query` metadata fields alongside the full paper object. Subsequent runs skip already-seen papers.
+
+**Cron example:**
+
+```bash
+# Check for new papers every morning and log them
+0 8 * * * papyrus watch run >> ~/papers/new-papers.jsonl
+```
+
+### `papyrus similar`  -  paper similarity & recommendations
+
+Find papers similar to a given one, either via Semantic Scholar's recommendations API or offline using TF-IDF cosine similarity against your local library.
+
+```bash
+# S2 API recommendations (requires S2 paper ID)
+papyrus similar <s2-paper-id> --limit 10
+
+# Offline TF-IDF similarity from your local library
+papyrus similar <paper-uuid> --from-library --limit 5
+```
+
+The `--from-library` mode ranks all papers in your library by cosine similarity to the query paper's title and abstract — no network required.
+
+### `papyrus download`  -  PDF download & indexing
+
+Downloads PDFs and organizes them by year and first author. Optionally extracts full text via `pdftotext` and indexes it in the library for `--fulltext` search.
+
+```bash
+# Download a single paper by UUID (from your library)
+papyrus download <paper-uuid>
+
+# Specify a target directory
+papyrus download <paper-uuid> --dir ~/papers
+
+# Download all papers with PDF URLs from the last search
+papyrus download --all --dir ~/papers
+```
+
+PDFs are saved as `<year>/<author>/<year>_<author>_<title-slug>.pdf`. If `pdftotext` is on your PATH, full text is extracted and stored in the library automatically.
+
+### `papyrus plugins`  -  plugin system
+
+Extend papyrus with custom data sources. Plugins are external binaries that communicate over a JSON stdin/stdout protocol.
+
+```bash
+# List installed plugins
+papyrus plugins list
+
+# Install a plugin (copies directory to plugins dir)
+papyrus plugins install ./my-plugin/
+```
+
+**Plugin directory:** `~/.config/papyrus/plugins/`
+
+Each plugin lives in its own subdirectory and contains a `manifest.toml`:
+
+```toml
+name        = "biorxiv"
+version     = "1.0.0"
+description = "bioRxiv preprint search"
+binary      = "biorxiv-plugin"
+sources     = ["biorxiv"]
+```
+
+When a search runs, papyrus sends a JSON request to the plugin binary on stdin and reads a JSON response from stdout:
+
+```json
+// Request (stdin)
+{ "action": "search", "query": "CRISPR", "limit": 20, "date_from": "2024-01-01" }
+
+// Response (stdout)
+{ "papers": [{ "id": "...", "title": "...", "authors": [...], "year": 2024 }], "total": 42 }
+```
+
 ### `papyrus keys`  -  API key management
 
 ```bash
@@ -174,7 +335,7 @@ papyrus cache clear   # delete all cached responses
 papyrus serve         # start MCP server over stdio
 ```
 
-Exposes `search_papers`, `get_paper`, and `export_papers` as MCP tools. See the [agent integration](#agent-integration) section for host config.
+Exposes 7 MCP tools for AI agents. See the [agent integration](#agent-integration) section.
 
 ### `papyrus schema`  -  JSON schema
 
@@ -194,6 +355,7 @@ papyrus schema all      # both, as { "input": ..., "output": ... }
 | `f` | Open filter modal |
 | `e` | Open export modal |
 | `r` | Re-run current search |
+| `i` | Save selected paper to local library |
 | `q` | Quit |
 | `?` | Help screen |
 | `j` / `↓` | Move down in results |
@@ -241,7 +403,7 @@ default_export_path = "~/papers"
 default_format      = "json"
 
 [network]
-user_agent   = "papyrus/0.1.0 (mailto:you@example.com)"
+user_agent   = "papyrus/1.0.0 (mailto:you@example.com)"
 polite_email = ""    # CrossRef polite pool  -  better rate limits
 
 [ui]
@@ -255,8 +417,10 @@ date_format            = "%Y-%m-%d"
 | Purpose | Default path |
 |---------|-------------|
 | Config | `~/.config/papyrus/config.toml` |
+| Library database | `~/.local/share/papyrus/papyrus.db` |
 | Response cache | `~/.local/share/papyrus/cache/` |
-| Logs | `~/.local/share/papyrus/` |
+| Downloaded PDFs | `~/papers/` (configurable via `--dir`) |
+| Plugins | `~/.config/papyrus/plugins/` |
 
 ---
 
@@ -301,6 +465,18 @@ papyrus -q "..." --no-cache      # bypass cache for this run
 
 ---
 
+## Deduplication
+
+Results fetched from multiple sources are automatically deduplicated before display or export. The dedup pipeline runs in order:
+
+1. **DOI match** — same DOI → merge
+2. **arXiv ID match** — same arXiv ID → merge
+3. **Fuzzy title match** — Jaccard similarity ≥ 0.85 on character trigrams → merge
+
+When merging, the record with more fields populated is kept (richest-record strategy). Title normalization folds Unicode Latin-extended characters and strips punctuation before comparison.
+
+---
+
 ## Data sources
 
 | Source | API | Key |
@@ -331,13 +507,17 @@ papyrus exposes a first-class interface for AI agents and shell scripts.
 }
 ```
 
-Three tools are exposed:
+Seven tools are exposed:
 
 | Tool | Description |
 |------|-------------|
 | `search_papers` | Search across all configured sources; returns full paper objects |
 | `get_paper` | Fetch a single paper by DOI, arXiv ID, or PubMed ID |
 | `export_papers` | Export paper IDs from a previous search to JSON / CSV / BibTeX |
+| `literature_review` | Multi-source search with dedup, sorted by citations; agent-optimized output |
+| `explore_citations` | Fetch and traverse the citation graph for a paper (BFS, configurable depth) |
+| `check_watches` | Check saved watches for new papers; optionally mark as seen |
+| `similar_papers` | Find papers similar to a given one via S2 API or offline TF-IDF |
 
 Full input/output schemas are registered in the tool manifest so the host can auto-generate parameters without hardcoding them.
 
@@ -386,6 +566,9 @@ papyrus --no-tui --output-mode jsonl -q "attention mechanism" --from 2023 \
 # Check exit code for partial failure
 papyrus --no-tui -q "transformers" -s all -n 100 -o results.bib
 [ $? -eq 1 ] && echo "Warning: some sources failed, results may be incomplete"
+
+# Watch for new papers and pipe to a notification script
+papyrus watch run | jq -r '.__watch_name + ": " + .title' | notify-send -
 ```
 
 ---
@@ -393,7 +576,7 @@ papyrus --no-tui -q "transformers" -s all -n 100 -o results.bib
 ## Examples
 
 ```bash
-# LLM papers from 2024 with PDF, interactive TUI
+# LLM papers from 2024 with PDF, interactive TUI (auto-saved to library)
 papyrus -q "large language models" --from 2024 --has-pdf
 
 # Top 100 cited RL papers, exported to BibTeX
@@ -414,6 +597,20 @@ papyrus --no-tui -q "diffusion models" --from 2023 --has-pdf -n 50 --no-cache | 
 # Configure API key, then run at higher rate limit
 papyrus keys set semantic sk-...
 PAPYRUS_PUBMED_KEY=xxx papyrus -q "CRISPR" -s pubmed -n 100
+
+# Build a citation graph and find seminal papers
+papyrus cite-graph fetch 204e3073870fae3d05bcbc2f6a8e263d9b72e776
+papyrus cite-graph seminal --limit 10
+
+# Find papers similar to one in your library
+papyrus similar <paper-uuid> --from-library --limit 5
+
+# Set up a watch and run it from cron
+papyrus watch add "large language models" --sources "arxiv" --name "LLM watch"
+papyrus watch run >> ~/papers/new-papers.jsonl
+
+# Download a paper PDF with full-text indexing
+papyrus download <paper-uuid> --dir ~/papers
 ```
 
 ---

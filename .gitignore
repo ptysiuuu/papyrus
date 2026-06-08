@@ -10,3 +10,4 @@ Cargo.lock
 *.csv
 *.bib
 papers/
+graphify-out/

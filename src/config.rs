@@ -144,6 +144,18 @@ impl Config {
         Self::log_dir().join("cache")
     }
 
+    pub fn db_path() -> PathBuf {
+        Self::log_dir().join("papyrus.db")
+    }
+
+    pub fn plugins_dir() -> PathBuf {
+        Self::default_path()
+            .parent()
+            .unwrap_or(std::path::Path::new("~/.config/papyrus"))
+            .to_path_buf()
+            .join("plugins")
+    }
+
     /// Load config, creating a default template on first run.
     pub fn load(path: Option<&PathBuf>) -> anyhow::Result<Self> {
         let config_path = path.cloned().unwrap_or_else(Self::default_path);

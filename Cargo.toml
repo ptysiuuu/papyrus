@@ -1,13 +1,17 @@
 [package]
 name = "papyrus"
-version = "0.2.0"
+version = "1.0.0"
 edition = "2021"
-description = "Terminal research paper scraper with Ratatui TUI"
+description = "Terminal research paper scraper with citation graph, local library, and MCP server"
 license = "MIT"
 
 [[bin]]
 name = "papyrus"
 path = "src/main.rs"
+
+[lib]
+name = "papyrus_lib"
+path = "src/lib.rs"
 
 [dependencies]
 ratatui = "0.28"
@@ -33,3 +37,10 @@ sha2 = "0.10"
 flate2 = "1"
 rmcp = { version = "1.7.0", features = ["server", "macros", "transport-io"] }
 schemars = { version = "1", features = ["chrono04"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+unicode-normalization = "0.1"
+strsim = "0.11"
+indicatif = "0.17"
+
+[dev-dependencies]
+tempfile = "3"

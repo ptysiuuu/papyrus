@@ -1,4 +1,4 @@
-use chrono::{NaiveDate, Local, Duration, Datelike};
+use chrono::{Duration, Local, Months, NaiveDate};
 use clap::Args;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -221,6 +221,37 @@ pub struct FilterArgs {
     pub offset: u32,
 }
 
+impl Default for FilterArgs {
+    fn default() -> Self {
+        Self {
+            query: None,
+            title: None,
+            abstract_query: None,
+            authors: Vec::new(),
+            categories: Vec::new(),
+            journal: None,
+            doi: None,
+            arxiv_id: None,
+            from: None,
+            to: None,
+            year: None,
+            last_days: None,
+            last_months: None,
+            min_citations: None,
+            max_citations: None,
+            has_pdf: false,
+            has_code: false,
+            peer_reviewed: false,
+            preprint_only: false,
+            open_access: false,
+            sources: Vec::new(),
+            sort: "relevance".to_string(),
+            limit: 20,
+            offset: 0,
+        }
+    }
+}
+
 pub fn parse_flexible_date_pub(s: &str) -> Option<NaiveDate> {
     parse_flexible_date(s).ok()
 }
@@ -300,12 +331,10 @@ impl FilterArgs {
 
         if let Some(months) = self.last_months {
             let today = Local::now().date_naive();
-            let from = NaiveDate::from_ymd_opt(
-                today.year(),
-                today.month().saturating_sub(months as u32).max(1),
-                today.day(),
-            )
-            .unwrap_or(today);
+            // Use chrono::Months which correctly handles year boundaries
+            let from = today
+                .checked_sub_months(Months::new(months))
+                .unwrap_or(today);
             fs.date_from = Some(from);
             fs.date_to = Some(today);
         }

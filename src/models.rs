@@ -12,6 +12,46 @@ pub enum PaperSourceKind {
     CrossRef,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadStatus {
+    #[default]
+    Unread,
+    Reading,
+    Read,
+    Reviewed,
+}
+
+impl ReadStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ReadStatus::Unread => "unread",
+            ReadStatus::Reading => "reading",
+            ReadStatus::Read => "read",
+            ReadStatus::Reviewed => "reviewed",
+        }
+    }
+}
+
+impl std::fmt::Display for ReadStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for ReadStatus {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "unread" => Ok(ReadStatus::Unread),
+            "reading" => Ok(ReadStatus::Reading),
+            "read" => Ok(ReadStatus::Read),
+            "reviewed" => Ok(ReadStatus::Reviewed),
+            other => Err(anyhow::anyhow!("Unknown read status: '{}'", other)),
+        }
+    }
+}
+
 impl std::fmt::Display for PaperSourceKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -47,6 +87,8 @@ pub struct Paper {
     pub journal: Option<String>,
     pub doi: Option<String>,
     pub arxiv_id: Option<String>,
+    pub pubmed_id: Option<String>,
+    pub semantic_scholar_id: Option<String>,
     pub pdf_url: Option<String>,
     pub html_url: Option<String>,
     pub code_url: Option<String>,
@@ -55,6 +97,20 @@ pub struct Paper {
     pub is_open_access: bool,
     pub is_peer_reviewed: bool,
     pub tags: Vec<String>,
+    /// One-sentence TLDR from Semantic Scholar
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tldr: Option<String>,
+    // ── Library fields (populated when loading from local DB) ──
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_status: Option<ReadStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pdf_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_text: Option<String>,
 }
 
 impl Paper {
@@ -72,6 +128,8 @@ impl Paper {
             journal: None,
             doi: None,
             arxiv_id: None,
+            pubmed_id: None,
+            semantic_scholar_id: None,
             pdf_url: None,
             html_url: None,
             code_url: None,
@@ -80,6 +138,12 @@ impl Paper {
             is_open_access: false,
             is_peer_reviewed: false,
             tags: Vec::new(),
+            tldr: None,
+            read_status: None,
+            notes: None,
+            priority: None,
+            pdf_path: None,
+            full_text: None,
         }
     }
 

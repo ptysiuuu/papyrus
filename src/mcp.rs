@@ -15,10 +15,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::cache::DiskCache;
+use crate::citation_graph::{CitationGraphClient, CitationGraphStore};
+use crate::db::Database;
 use crate::export::{export_papers, ExportFormat};
 use crate::filters::{FilterSet, parse_flexible_date_pub};
 use crate::models::{Paper, PaperSourceKind};
 use crate::scraper::PaperSource;
+use crate::similarity::{SimilarityClient, TfIdfIndex};
 
 // ─── Input / output types ────────────────────────────────────────────────────
 
@@ -108,20 +111,111 @@ pub struct ExportOutput {
     pub count: usize,
 }
 
+// ─── New tool I/O types ───────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExploreCitationsInput {
+    #[schemars(description = "Semantic Scholar paper ID")]
+    pub paper_id: String,
+    #[schemars(description = "Traversal direction: 'ancestors' (references) or 'descendants' (citing papers)")]
+    pub direction: Option<String>,
+    #[schemars(description = "How many hops to traverse (default 2, max 5)")]
+    pub depth: Option<usize>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CitationNode {
+    pub s2id: String,
+    pub title: String,
+    pub citation_count: Option<u64>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ExploreCitationsOutput {
+    pub nodes: Vec<CitationNode>,
+    pub count: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LiteratureReviewInput {
+    #[schemars(description = "Research topic to survey")]
+    pub topic: String,
+    #[schemars(description = "Max papers to return (default 20)")]
+    pub limit: Option<u32>,
+    #[schemars(description = "Sources: arxiv, semantic, pubmed, crossref, all")]
+    pub sources: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct LiteratureReviewOutput {
+    pub papers: Vec<Paper>,
+    pub total: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CheckWatchesInput {
+    #[schemars(description = "If true, also mark results as seen (updates last_run)")]
+    pub mark_seen: Option<bool>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WatchResult {
+    pub watch_id: String,
+    pub watch_name: Option<String>,
+    pub query: String,
+    pub new_papers: Vec<Paper>,
+    pub new_count: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CheckWatchesOutput {
+    pub results: Vec<WatchResult>,
+    pub total_new: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SimilarPapersInput {
+    #[schemars(description = "Semantic Scholar paper ID to find recommendations for")]
+    pub paper_id: String,
+    #[schemars(description = "Max results (default 10)")]
+    pub limit: Option<u32>,
+    #[schemars(description = "Use local TF-IDF instead of S2 API")]
+    pub offline: Option<bool>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SimilarPapersOutput {
+    pub papers: Vec<Paper>,
+    pub total: usize,
+}
+
 // ─── Server ──────────────────────────────────────────────────────────────────
 
 pub struct PapyrusMcp {
     sources: Vec<Arc<dyn PaperSource>>,
     disk_cache: Option<Arc<DiskCache>>,
     paper_store: Arc<Mutex<HashMap<String, Paper>>>,
+    db: Arc<Mutex<Option<Database>>>,
+    s2_api_key: Option<String>,
 }
 
 impl PapyrusMcp {
     pub fn new(sources: Vec<Arc<dyn PaperSource>>, disk_cache: Option<Arc<DiskCache>>) -> Self {
+        Self::with_config(sources, disk_cache, None)
+    }
+
+    pub fn with_config(
+        sources: Vec<Arc<dyn PaperSource>>,
+        disk_cache: Option<Arc<DiskCache>>,
+        s2_api_key: Option<String>,
+    ) -> Self {
+        let db = Database::open_default().ok();
         Self {
             sources,
             disk_cache,
             paper_store: Arc::new(Mutex::new(HashMap::new())),
+            db: Arc::new(Mutex::new(db)),
+            s2_api_key,
         }
     }
 
@@ -348,6 +442,185 @@ impl PapyrusMcp {
             path: path.to_string_lossy().into_owned(),
         }))
     }
+
+    #[tool(description = "Explore the citation graph for a paper. Fetch ancestors (papers it references) or descendants (papers that cite it). Requires the paper to have been indexed with 'cite-graph fetch' first, or will auto-fetch from Semantic Scholar.")]
+    async fn explore_citations(
+        &self,
+        Parameters(input): Parameters<ExploreCitationsInput>,
+    ) -> Result<Json<ExploreCitationsOutput>, rmcp::ErrorData> {
+        let depth = input.depth.unwrap_or(2).min(5);
+        let direction = input.direction.as_deref().unwrap_or("ancestors");
+
+        let db = Database::open_default()
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        // Auto-fetch from S2 if not in graph
+        let store = CitationGraphStore::new(db);
+        let has_refs = store.get_references(&input.paper_id)
+            .map(|r| !r.is_empty())
+            .unwrap_or(false);
+
+        if !has_refs {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap_or_default();
+            let graph_client = CitationGraphClient::new(client, self.s2_api_key.clone());
+            let _ = graph_client.fetch_and_store_references(&input.paper_id, &store, 100).await;
+            let _ = graph_client.fetch_and_store_citations(&input.paper_id, &store, 100).await;
+        }
+
+        let nodes = match direction {
+            "descendants" => store.descendants(&input.paper_id, depth),
+            _ => store.ancestors(&input.paper_id, depth),
+        }
+        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        let result: Vec<CitationNode> = nodes
+            .into_iter()
+            .map(|n| CitationNode { s2id: n.s2id, title: n.title, citation_count: n.citation_count })
+            .collect();
+        let count = result.len();
+        Ok(Json(ExploreCitationsOutput { nodes: result, count }))
+    }
+
+    #[tool(description = "Run a literature review: multi-source search, deduplicate, rank by citations, return top papers with metadata. A single call to survey a research topic.")]
+    async fn literature_review(
+        &self,
+        Parameters(input): Parameters<LiteratureReviewInput>,
+    ) -> Result<Json<LiteratureReviewOutput>, rmcp::ErrorData> {
+        let mut fs = FilterSet::default();
+        fs.query = Some(input.topic.clone());
+        fs.limit = input.limit.unwrap_or(20).min(100);
+        if let Some(srcs) = input.sources {
+            if !srcs.is_empty() {
+                let mut parsed = Vec::new();
+                for s in &srcs {
+                    if let Ok(p) = parse_source(s) {
+                        parsed.extend(p);
+                    }
+                }
+                if !parsed.is_empty() {
+                    fs.sources = parsed;
+                }
+            }
+        }
+
+        let out = self.do_search(fs).await
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        // Sort by citation count descending
+        let mut papers = out.papers;
+        papers.sort_by(|a, b| b.citation_count.unwrap_or(0).cmp(&a.citation_count.unwrap_or(0)));
+
+        let total = papers.len();
+        Ok(Json(LiteratureReviewOutput { papers, total }))
+    }
+
+    #[tool(description = "Check all saved watch queries for new papers since last run. Returns new papers per watch.")]
+    async fn check_watches(
+        &self,
+        Parameters(input): Parameters<CheckWatchesInput>,
+    ) -> Result<Json<CheckWatchesOutput>, rmcp::ErrorData> {
+        let mark_seen = input.mark_seen.unwrap_or(true);
+
+        let db = Database::open_default()
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let watches = db.list_watches()
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        let mut results = Vec::new();
+        let mut total_new = 0;
+
+        for w in &watches {
+            let mut fs = FilterSet::default();
+            fs.query = Some(w.query.clone());
+
+            let out = self.do_search(fs).await.unwrap_or_else(|_| crate::mcp::SearchOutput {
+                papers: Vec::new(),
+                total: 0,
+                sources_hit: Vec::new(),
+                sources_degraded: Vec::new(),
+                cached: false,
+            });
+
+            let db2 = Database::open_default()
+                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            let runner = crate::watch::WatchRunner::new(db2);
+            let new_papers = if mark_seen {
+                runner.filter_new_papers(&w.id, &out.papers)
+                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+            } else {
+                // Dry run: check without marking
+                let db3 = Database::open_default()
+                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                let mut new = Vec::new();
+                for paper in &out.papers {
+                    let key = format!("{}:{}", crate::db::source_kind_to_str(&paper.source), paper.source_id);
+                    if !db3.was_watch_paper_seen(&w.id, &key)
+                        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))? {
+                        new.push(paper.clone());
+                    }
+                }
+                new
+            };
+
+            if mark_seen {
+                let _ = db.update_watch_last_run(&w.id);
+            }
+
+            let new_count = new_papers.len();
+            total_new += new_count;
+
+            results.push(WatchResult {
+                watch_id: w.id.clone(),
+                watch_name: w.name.clone(),
+                query: w.query.clone(),
+                new_papers,
+                new_count,
+            });
+        }
+
+        Ok(Json(CheckWatchesOutput { results, total_new }))
+    }
+
+    #[tool(description = "Find papers similar to a given Semantic Scholar paper ID, using the S2 recommendations API or offline TF-IDF against your local library.")]
+    async fn similar_papers(
+        &self,
+        Parameters(input): Parameters<SimilarPapersInput>,
+    ) -> Result<Json<SimilarPapersOutput>, rmcp::ErrorData> {
+        let limit = input.limit.unwrap_or(10);
+        let offline = input.offline.unwrap_or(false);
+
+        if offline {
+            let db = Database::open_default()
+                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            let query = db.get_paper_by_id(&input.paper_id)
+                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+                .ok_or_else(|| rmcp::ErrorData::invalid_params(
+                    format!("Paper {} not found in local library", input.paper_id),
+                    None,
+                ))?;
+
+            let all = db.list_papers(usize::MAX, 0)
+                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            let index = TfIdfIndex::build(&all);
+            let similar = index.find_similar(&query, limit as usize);
+            let papers: Vec<Paper> = similar.into_iter().map(|(p, _)| p.clone()).collect();
+            let total = papers.len();
+            return Ok(Json(SimilarPapersOutput { papers, total }));
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_default();
+        let sim_client = SimilarityClient::new(client, self.s2_api_key.clone());
+        let papers = sim_client.recommendations(&input.paper_id, limit).await
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let total = papers.len();
+        Ok(Json(SimilarPapersOutput { papers, total }))
+    }
 }
 
 #[rmcp::tool_handler]
@@ -373,7 +646,15 @@ pub async fn run_mcp_server(
     sources: Vec<Arc<dyn PaperSource>>,
     disk_cache: Option<Arc<DiskCache>>,
 ) -> anyhow::Result<()> {
-    let server = PapyrusMcp::new(sources, disk_cache);
+    run_mcp_server_with_key(sources, disk_cache, None).await
+}
+
+pub async fn run_mcp_server_with_key(
+    sources: Vec<Arc<dyn PaperSource>>,
+    disk_cache: Option<Arc<DiskCache>>,
+    s2_api_key: Option<String>,
+) -> anyhow::Result<()> {
+    let server = PapyrusMcp::with_config(sources, disk_cache, s2_api_key);
     let running = server.serve(stdio()).await?;
     running.waiting().await?;
     Ok(())

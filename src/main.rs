@@ -1,15 +1,23 @@
 #![allow(dead_code)]
 mod app;
 mod cache;
+mod citation_graph;
 mod config;
+mod db;
+mod dedup;
+mod download;
 mod error;
 mod export;
 mod filters;
+mod library;
 mod mcp;
 mod models;
+mod plugin;
 mod ratelimit;
 mod scraper;
+mod similarity;
 mod ui;
+mod watch;
 
 use std::io;
 use std::path::PathBuf;
@@ -99,10 +107,22 @@ enum Commands {
     Serve,
     /// Print JSON schema for tool input/output
     Schema {
-        /// Which schema to print: input, output, or all
         #[arg(value_enum, default_value = "all")]
         which: SchemaTarget,
     },
+    /// Local paper library management
+    Library(LibraryArgs),
+    /// Citation graph operations
+    #[command(name = "cite-graph")]
+    CiteGraph(CiteGraphArgs),
+    /// Watch queries for new papers
+    Watch(WatchArgs),
+    /// Find similar papers
+    Similar(SimilarArgs),
+    /// Download PDFs
+    Download(DownloadArgs),
+    /// Plugin management
+    Plugins(PluginsArgs),
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -142,6 +162,168 @@ enum CacheAction {
     Stats,
 }
 
+// ─── Library ─────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct LibraryArgs {
+    #[command(subcommand)]
+    action: LibraryAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum LibraryAction {
+    /// Full-text search your local library
+    Search {
+        query: String,
+        /// Also search inside PDF full-text
+        #[arg(long)]
+        fulltext: bool,
+    },
+    /// Add a paper by source:id (e.g. arxiv:2301.07041) to your library
+    Add { paper_id: String },
+    /// Tag a paper
+    Tag { paper_id: String, tags: Vec<String> },
+    /// Remove a tag from a paper
+    Untag { paper_id: String, tag: String },
+    /// Show library statistics
+    Stats,
+    /// Set read status (unread|reading|read|reviewed)
+    Status { paper_id: String, status: String },
+    /// Add or replace notes for a paper
+    Note { paper_id: String, note: String },
+    /// Set priority 1-5
+    Priority { paper_id: String, #[arg(value_parser = clap::value_parser!(u8).range(1..=5))] priority: u8 },
+    /// Show potential duplicate papers
+    Duplicates,
+    /// Create a collection
+    #[command(name = "create-collection")]
+    CreateCollection { name: String },
+    /// List collections
+    #[command(name = "list-collections")]
+    ListCollections,
+    /// Export a literature review
+    #[command(name = "export-review")]
+    ExportReview {
+        #[arg(long)]
+        collection: Option<String>,
+        #[arg(short = 'o', long)]
+        output: PathBuf,
+        #[arg(short = 'f', long, default_value = "json")]
+        format: String,
+    },
+}
+
+// ─── Citation graph ───────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct CiteGraphArgs {
+    #[command(subcommand)]
+    action: CiteGraphAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum CiteGraphAction {
+    /// Fetch and store references/citations for a paper
+    Fetch {
+        paper_id: String,
+        #[arg(long, default_value = "100")]
+        limit: u32,
+    },
+    /// Walk backwards through references
+    Ancestors {
+        paper_id: String,
+        #[arg(long, default_value = "3")]
+        depth: usize,
+    },
+    /// Walk forward through citations
+    Descendants {
+        paper_id: String,
+        #[arg(long, default_value = "2")]
+        depth: usize,
+    },
+    /// Find shared references between two papers
+    Common { id1: String, id2: String },
+    /// Find highest-cited root nodes
+    Seminal {
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
+}
+
+// ─── Watch ────────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct WatchArgs {
+    #[command(subcommand)]
+    action: WatchAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum WatchAction {
+    /// Add a watch query
+    Add {
+        query: String,
+        #[arg(long, short = 's')]
+        sources: Vec<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        notify: bool,
+    },
+    /// Run all watches and report new papers
+    Run {
+        #[arg(long, default_value = "jsonl")]
+        output_mode: String,
+    },
+    /// List saved watches
+    List,
+    /// Remove a watch by ID
+    Remove { id: String },
+}
+
+// ─── Similar ─────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct SimilarArgs {
+    /// Semantic Scholar paper ID
+    paper_id: Option<String>,
+    /// Find similar papers from your local library (offline TF-IDF)
+    #[arg(long)]
+    from_library: bool,
+    #[arg(long, default_value = "10")]
+    limit: u32,
+}
+
+// ─── Download ────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct DownloadArgs {
+    /// Paper ID to download (from library or last search)
+    paper_id: Option<String>,
+    /// Download all papers with a PDF URL from last search results
+    #[arg(long)]
+    all: bool,
+    /// Download directory (default: ~/papers)
+    #[arg(long)]
+    dir: Option<PathBuf>,
+}
+
+// ─── Plugins ─────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct PluginsArgs {
+    #[command(subcommand)]
+    action: PluginsAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum PluginsAction {
+    /// List installed plugins
+    List,
+    /// Install a plugin (copy to plugins dir)
+    Install { name: String },
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -170,6 +352,18 @@ async fn main() -> anyhow::Result<()> {
             }
             Commands::Schema { which } => {
                 return print_schema(which);
+            }
+            Commands::CiteGraph(args) => {
+                return dispatch_cite_graph(args, &http_client, cli.api_key.as_deref(), &config).await;
+            }
+            Commands::Watch(args) => {
+                return dispatch_watch(args, &http_client, cli.api_key.as_deref(), &config).await;
+            }
+            Commands::Similar(args) => {
+                return dispatch_similar(args, &http_client, cli.api_key.as_deref(), &config).await;
+            }
+            Commands::Download(args) => {
+                return dispatch_download(args, &http_client, &config).await;
             }
             other => {
                 return dispatch_subcommand(other, &config_path, &config);
@@ -247,8 +441,345 @@ fn dispatch_subcommand(
                 println!("Location: {}", Config::cache_dir().display());
             }
         },
-        // Serve and Schema are handled before dispatch_subcommand is called
-        Commands::Serve | Commands::Schema { .. } => unreachable!(),
+        Commands::Library(args) => {
+            let db = db::Database::open_default()?;
+            dispatch_library(args, &db)?;
+        }
+        Commands::Plugins(args) => {
+            dispatch_plugins(args)?;
+        }
+        // Async commands handled before dispatch_subcommand
+        Commands::Serve | Commands::Schema { .. }
+        | Commands::CiteGraph(_) | Commands::Watch(_)
+        | Commands::Similar(_) | Commands::Download(_) => unreachable!(),
+    }
+    Ok(())
+}
+
+fn dispatch_library(args: LibraryArgs, db: &db::Database) -> anyhow::Result<()> {
+    match args.action {
+        LibraryAction::Search { query, fulltext } => {
+            let papers = library::cmd_library_search(db, &query, fulltext)?;
+            if papers.is_empty() {
+                println!("No results found in library.");
+            } else {
+                println!("{:>4}  {:<60}  {:>4}  {:>6}", "#", "Title", "Year", "Cites");
+                println!("{}", "-".repeat(80));
+                for (i, p) in papers.iter().enumerate() {
+                    let title: String = p.title.chars().take(60).collect();
+                    let year = p.year().map(|y| y.to_string()).unwrap_or_default();
+                    let cites = p.citation_count.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string());
+                    println!("{:>4}  {:<60}  {:>4}  {:>6}", i + 1, title, year, cites);
+                }
+            }
+        }
+        LibraryAction::Add { paper_id } => {
+            // paper_id format: "source:source_id"
+            let (src, sid) = paper_id.split_once(':')
+                .ok_or_else(|| anyhow::anyhow!("Use format source:id (e.g. arxiv:2301.07041)"))?;
+            if let Some(paper) = db.get_paper_by_source(src, sid)? {
+                println!("Paper already in library: {}", paper.title);
+            } else {
+                println!("Paper {} not found in cache. Run a search first to populate the library.", paper_id);
+            }
+        }
+        LibraryAction::Tag { paper_id, tags } => {
+            let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+            library::cmd_library_tag(db, &paper_id, &tag_refs)?;
+            println!("Tagged {} with: {}", &paper_id[..8.min(paper_id.len())], tags.join(", "));
+        }
+        LibraryAction::Untag { paper_id, tag } => {
+            library::cmd_library_untag(db, &paper_id, &tag)?;
+            println!("Removed tag '{}' from {}", tag, &paper_id[..8.min(paper_id.len())]);
+        }
+        LibraryAction::Stats => {
+            library::cmd_library_stats(db)?;
+        }
+        LibraryAction::Status { paper_id, status } => {
+            library::cmd_library_status(db, &paper_id, &status)?;
+            println!("Set status '{}' on {}", status, &paper_id[..8.min(paper_id.len())]);
+        }
+        LibraryAction::Note { paper_id, note } => {
+            library::cmd_library_note(db, &paper_id, &note)?;
+            println!("Note saved.");
+        }
+        LibraryAction::Priority { paper_id, priority } => {
+            library::cmd_library_priority(db, &paper_id, priority)?;
+            println!("Priority set to {}.", priority);
+        }
+        LibraryAction::Duplicates => {
+            library::cmd_library_duplicates(db)?;
+        }
+        LibraryAction::CreateCollection { name } => {
+            library::cmd_create_collection(db, &name)?;
+        }
+        LibraryAction::ListCollections => {
+            library::cmd_list_collections(db)?;
+        }
+        LibraryAction::ExportReview { collection, output, format } => {
+            let fmt = export::ExportFormat::from_str(&format)
+                .ok_or_else(|| anyhow::anyhow!("Unknown format: {}", format))?;
+            library::cmd_library_export_review(db, collection.as_deref(), &output, fmt)?;
+        }
+    }
+    Ok(())
+}
+
+fn dispatch_plugins(args: PluginsArgs) -> anyhow::Result<()> {
+    let plugins_dir = plugin::plugins_dir();
+    match args.action {
+        PluginsAction::List => {
+            let plugins = plugin::discover_plugins(&plugins_dir)?;
+            if plugins.is_empty() {
+                println!("No plugins installed. Plugin dir: {}", plugins_dir.display());
+                println!("Drop a plugin directory with manifest.toml into: {}", plugins_dir.display());
+            } else {
+                println!("{:<20} {:<10} {}", "Name", "Version", "Description");
+                println!("{}", "-".repeat(60));
+                for p in plugins {
+                    println!("{:<20} {:<10} {}", p.name, p.version, p.description);
+                }
+            }
+        }
+        PluginsAction::Install { name } => {
+            println!("To install a plugin, place its directory in: {}", plugins_dir.join(&name).display());
+            println!("The directory must contain a manifest.toml file.");
+        }
+    }
+    Ok(())
+}
+
+async fn dispatch_cite_graph(
+    args: CiteGraphArgs,
+    client: &reqwest::Client,
+    api_key: Option<&str>,
+    config: &Config,
+) -> anyhow::Result<()> {
+    let db = db::Database::open_default()?;
+    let store = citation_graph::CitationGraphStore::new(db);
+    let semantic_key = Config::resolve_key(api_key, "PAPYRUS_SEMANTIC_KEY", config.api_keys.semantic_scholar.as_deref());
+    let graph_client = citation_graph::CitationGraphClient::new(client.clone(), semantic_key);
+
+    match args.action {
+        CiteGraphAction::Fetch { paper_id, limit } => {
+            eprintln!("Fetching references for {}...", paper_id);
+            let n = graph_client.fetch_and_store_references(&paper_id, &store, limit).await?;
+            eprintln!("Fetching citations for {}...", paper_id);
+            let m = graph_client.fetch_and_store_citations(&paper_id, &store, limit).await?;
+            println!("Stored {} references and {} citations.", n, m);
+        }
+        CiteGraphAction::Ancestors { paper_id, depth } => {
+            let nodes = store.ancestors(&paper_id, depth)?;
+            println!("Ancestors of {} (depth {}): {} nodes", &paper_id, depth, nodes.len());
+            for node in &nodes {
+                let cites = node.citation_count.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string());
+                println!("  [{:>8}] {} ({})", cites, node.title, node.s2id);
+            }
+        }
+        CiteGraphAction::Descendants { paper_id, depth } => {
+            let nodes = store.descendants(&paper_id, depth)?;
+            println!("Descendants of {} (depth {}): {} nodes", &paper_id, depth, nodes.len());
+            for node in &nodes {
+                let cites = node.citation_count.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string());
+                println!("  [{:>8}] {} ({})", cites, node.title, node.s2id);
+            }
+        }
+        CiteGraphAction::Common { id1, id2 } => {
+            let common = store.common_references(&id1, &id2)?;
+            println!("Shared references between {} and {}: {} papers", id1, id2, common.len());
+            for node in &common {
+                let cites = node.citation_count.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string());
+                println!("  [{:>8}] {} ({})", cites, node.title, node.s2id);
+            }
+        }
+        CiteGraphAction::Seminal { limit } => {
+            let nodes = store.seminal_nodes(limit)?;
+            println!("Top {} seminal papers in citation graph:", limit);
+            for (i, node) in nodes.iter().enumerate() {
+                let cites = node.citation_count.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string());
+                println!("  {:>3}. [{:>8}] {} ({})", i + 1, cites, node.title, node.s2id);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn dispatch_watch(
+    args: WatchArgs,
+    client: &reqwest::Client,
+    api_key: Option<&str>,
+    config: &Config,
+) -> anyhow::Result<()> {
+    let db = db::Database::open_default()?;
+
+    match args.action {
+        WatchAction::Add { query, sources, name, notify } => {
+            let src_refs: Vec<&str> = if sources.is_empty() {
+                vec!["arxiv", "semantic_scholar"]
+            } else {
+                sources.iter().map(String::as_str).collect()
+            };
+            let id = db.add_watch(&query, &src_refs, name.as_deref(), notify)?;
+            println!("Watch added: '{}' (id: {})", query, &id[..8]);
+        }
+        WatchAction::List => {
+            let watches = db.list_watches()?;
+            if watches.is_empty() {
+                println!("No watches configured.");
+            } else {
+                for w in &watches {
+                    let last = w.last_run_at.as_deref().unwrap_or("never");
+                    println!("[{}] {:?}: '{}' (sources: {}, last: {})",
+                        &w.id[..8],
+                        w.name.as_deref().unwrap_or("-"),
+                        w.query,
+                        w.sources.join(","),
+                        last);
+                }
+            }
+        }
+        WatchAction::Remove { id } => {
+            db.remove_watch(&id)?;
+            println!("Watch {} removed.", &id[..8.min(id.len())]);
+        }
+        WatchAction::Run { output_mode } => {
+            let watches = db.list_watches()?;
+            if watches.is_empty() {
+                eprintln!("No watches configured. Use 'papyrus watch add' to add one.");
+                return Ok(());
+            }
+
+            let filter_set = filters::FilterSet::default();
+            let sources = build_sources(&filter_set, client, api_key, config);
+
+            for w in &watches {
+                eprintln!("Running watch: {:?} '{}'", w.name.as_deref().unwrap_or(""), w.query);
+                let mut fs = filters::FilterSet::default();
+                fs.query = Some(w.query.clone());
+
+                // Filter sources to those in the watch
+                let watch_sources: Vec<Arc<dyn PaperSource>> = sources.iter()
+                    .filter(|s| {
+                        let name = s.name().to_lowercase().replace(' ', "_");
+                        w.sources.contains(&name) || w.sources.is_empty()
+                    })
+                    .cloned()
+                    .collect();
+
+                let mut all_papers: Vec<Paper> = Vec::new();
+                for source in &watch_sources {
+                    match source.fetch(&fs, 0).await {
+                        Ok(result) => all_papers.extend(result.papers),
+                        Err(e) => eprintln!("  {} error: {}", source.name(), e),
+                    }
+                }
+                all_papers = dedup::fuzzy_dedup(all_papers);
+
+                let runner = watch::WatchRunner::new(db::Database::open_default()?);
+                let new_papers = runner.filter_new_papers(&w.id, &all_papers)?;
+                runner.update_last_run(&w.id)?;
+
+                if new_papers.is_empty() {
+                    eprintln!("  No new papers.");
+                } else {
+                    eprintln!("  {} new papers found.", new_papers.len());
+                    if output_mode == "jsonl" {
+                        watch::emit_jsonl(&new_papers, w.name.as_deref(), &w.query);
+                    } else {
+                        for p in &new_papers {
+                            println!("[{}] {}", p.published_date.map(|d| d.to_string()).unwrap_or_default(), p.title);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn dispatch_similar(
+    args: SimilarArgs,
+    client: &reqwest::Client,
+    api_key: Option<&str>,
+    config: &Config,
+) -> anyhow::Result<()> {
+    let semantic_key = Config::resolve_key(api_key, "PAPYRUS_SEMANTIC_KEY", config.api_keys.semantic_scholar.as_deref());
+    let sim_client = similarity::SimilarityClient::new(client.clone(), semantic_key);
+
+    if let Some(paper_id) = args.paper_id {
+        if args.from_library {
+            // Offline TF-IDF against library
+            let db = db::Database::open_default()?;
+            let query_paper = db.get_paper_by_id(&paper_id)?
+                .or_else(|| {
+                    // Try source:id lookup
+                    if let Some((src, sid)) = paper_id.split_once(':') {
+                        db.get_paper_by_source(src, sid).ok().flatten()
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| anyhow::anyhow!("Paper {} not found in library", paper_id))?;
+
+            let all_papers = db.list_papers(usize::MAX, 0)?;
+            let index = similarity::TfIdfIndex::build(&all_papers);
+            let similar = index.find_similar(&query_paper, args.limit as usize);
+
+            println!("Papers similar to: {}", query_paper.title);
+            for (p, score) in &similar {
+                println!("  {:.3}  {}", score, p.title);
+            }
+        } else {
+            // Use S2 recommendations API
+            let papers = sim_client.recommendations(&paper_id, args.limit).await?;
+            println!("Papers similar to S2 ID: {}", paper_id);
+            for p in &papers {
+                let cites = p.citation_count.map(|c| format!("{}", c)).unwrap_or_else(|| "-".to_string());
+                println!("  [{:>6}] {}", cites, p.title);
+            }
+        }
+    } else if args.from_library {
+        println!("Library-wide recommendations: run with a specific paper_id for TF-IDF similarity.");
+    } else {
+        anyhow::bail!("Provide a paper_id or use --from-library");
+    }
+    Ok(())
+}
+
+async fn dispatch_download(
+    args: DownloadArgs,
+    client: &reqwest::Client,
+    config: &Config,
+) -> anyhow::Result<()> {
+    let base_dir = args.dir
+        .or_else(|| {
+            let path = &config.output.default_export_path;
+            Some(PathBuf::from(path.replace('~', &std::env::var("HOME").unwrap_or_default())))
+        })
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("papers")
+        });
+
+    let downloader = download::PdfDownloader::new(client.clone(), base_dir);
+    let db = db::Database::open_default()?;
+
+    if let Some(paper_id) = args.paper_id {
+        let paper = db.get_paper_by_id(&paper_id)?
+            .or_else(|| {
+                if let Some((src, sid)) = paper_id.split_once(':') {
+                    db.get_paper_by_source(src, sid).ok().flatten()
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| anyhow::anyhow!("Paper {} not found in library", paper_id))?;
+
+        let path = downloader.download(&paper, Some(&db)).await?;
+        println!("Downloaded to: {}", path.display());
+    } else if args.all {
+        eprintln!("No cached papers available for bulk download. Run a search first.");
+    } else {
+        anyhow::bail!("Provide a paper_id or use --all");
     }
     Ok(())
 }
@@ -383,6 +914,13 @@ async fn run_batch(
 
     all_papers = deduplicate(all_papers);
 
+    // Auto-save to local library (silent, best-effort)
+    if let Ok(lib_db) = db::Database::open_default() {
+        for p in &all_papers {
+            let _ = lib_db.upsert_paper(p);
+        }
+    }
+
     // Emit JSONL metadata line last
     if matches!(output_mode, OutputMode::Jsonl) && output.is_none() {
         let meta = serde_json::json!({
@@ -447,15 +985,7 @@ fn print_pretty_table(papers: &[Paper]) {
 }
 
 fn deduplicate(papers: Vec<Paper>) -> Vec<Paper> {
-    let mut seen = std::collections::HashSet::new();
-    let mut result = Vec::new();
-    for paper in papers {
-        let key = paper.dedup_key();
-        if seen.insert(key) {
-            result.push(paper);
-        }
-    }
-    result
+    dedup::fuzzy_dedup(papers)
 }
 
 async fn run_tui(
@@ -576,6 +1106,12 @@ fn handle_app_event(app: &mut App, ev: AppEvent) {
         AppEvent::PapersReceived(papers, total, source_name, from_cache) => {
             if from_cache {
                 app.cached_sources.insert(source_name.clone());
+            }
+            // Auto-save to library (silent, best-effort)
+            if let Ok(lib_db) = db::Database::open_default() {
+                for p in &papers {
+                    let _ = lib_db.upsert_paper(p);
+                }
             }
             app.papers.extend(papers);
             app.papers = deduplicate(std::mem::take(&mut app.papers));
@@ -904,6 +1440,18 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Option<KeyAction> {
             app.modal = Modal::Tag;
             app.modal_input.clear();
             app.modal_cursor = 0;
+        }
+        KeyCode::Char('i') => {
+            // Save selected paper to library
+            if let Some(paper) = app.selected_paper() {
+                let paper = paper.clone();
+                if let Ok(lib_db) = db::Database::open_default() {
+                    match lib_db.upsert_paper(&paper) {
+                        Ok(_) => app.status_message = format!("✓ Saved to library: {}", app::truncate(&paper.title, 40)),
+                        Err(e) => app.status_message = format!("Library error: {}", e),
+                    }
+                }
+            }
         }
         _ => {}
     }
