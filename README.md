@@ -170,7 +170,7 @@ papyrus library status <paper-id> read
 # Add a note
 papyrus library note <paper-id> "Key paper for my lit review section 3"
 
-# Set priority 1–5
+# Set priority 1 - 5
 papyrus library priority <paper-id> 5
 
 # Tag a paper (multiple tags)
@@ -227,7 +227,7 @@ papyrus watch add "diffusion models" --sources "arxiv,semantic_scholar" --name "
 # List saved watches
 papyrus watch list
 
-# Run all watches — prints JSONL for new papers only
+# Run all watches  -  prints JSONL for new papers only
 papyrus watch run
 
 # Run in a specific output mode
@@ -258,7 +258,7 @@ papyrus similar <s2-paper-id> --limit 10
 papyrus similar <paper-uuid> --from-library --limit 5
 ```
 
-The `--from-library` mode ranks all papers in your library by cosine similarity to the query paper's title and abstract — no network required.
+The `--from-library` mode ranks all papers in your library by cosine similarity to the query paper's title and abstract  -  no network required.
 
 ### `papyrus download`  -  PDF download & indexing
 
@@ -469,9 +469,9 @@ papyrus -q "..." --no-cache      # bypass cache for this run
 
 Results fetched from multiple sources are automatically deduplicated before display or export. The dedup pipeline runs in order:
 
-1. **DOI match** — same DOI → merge
-2. **arXiv ID match** — same arXiv ID → merge
-3. **Fuzzy title match** — Jaccard similarity ≥ 0.85 on character trigrams → merge
+1. **DOI match**  -  same DOI  merge
+2. **arXiv ID match**  -  same arXiv ID  merge
+3. **Fuzzy title match**  -  Jaccard similarity ≥ 0.85 on character trigrams  merge
 
 When merging, the record with more fields populated is kept (richest-record strategy). Title normalization folds Unicode Latin-extended characters and strips punctuation before comparison.
 
